@@ -24,8 +24,8 @@ Our pre-print is online here:
 Please cite this compendium as:
 
 > Maynard, J. J., Yeboah, E., Owusu, S., Buenemann, M., Neff, J. C. and
-> Herrick, J. E., (2023). *Compendium of R code and data for Smallholder
-> Farm Soil Map Accuracy Assessment in Ghana*. Accessed 06 Apr 2023.
+> Herrick, J. E., (2023). *Compendium of R code and data for Soil Map Accuracy Assessment on Smallholder
+> Farms in Ghana*. Accessed 06 Apr 2023.
 > Online at <https://doi.org/10.5281/zenodo.7806564>
 
 ## Contents
