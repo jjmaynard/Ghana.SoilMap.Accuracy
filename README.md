@@ -1,7 +1,7 @@
 
 <!-- README.md is generated from README.Rmd. Please edit that file -->
 
-# Smallholder Farm Soil Map Accuracy Assessment in Ghana
+# Soil Map Accuracy Assessment on Smallholder Farms in Ghana
 
 [![Binder](https://mybinder.org/badge_logo.svg)](https://mybinder.org/v2/gh/jjmaynard/Ghana.SoilMap.Accuracy/master?urlpath=rstudio)
 
