@@ -20,18 +20,18 @@ Title <- "Title of your paper goes here"
 
 This repository contains the data and code for our paper:
 
-> Authors, (YYYY). _`r Title`_. Name of journal/book <https://doi.org/xxx/xxx>
+> Maynard, J. J., Yeboah, E., Owusu, S., Buenemann, M., Neff, J. C. and Herrick, J. E.: Accuracy of regional-to-global soil maps for on-farm decision making: Are soil maps “good enough”?, SOIL, accepted, 2023
 
 Our pre-print is online here:
 
-> Authors, (YYYY). _`r Title`_. Name of journal/book, Accessed `r format(Sys.Date(), "%d %b %Y")`. Online at <https://doi.org/xxx/xxx>
+> Maynard, J. J., Yeboah, E., Owusu, S., Buenemann, M., Neff, J. C. and Herrick, J. E.: Accuracy of regional-to-global soil maps for on-farm decision making: Are soil maps “good enough”?, EGUsphere, preprint(May), 1–35 [online] Available from: https://doi.org/10.5194/egusphere-2022-246, 2022.
 
 
 ### How to cite
 
 Please cite this compendium as:
 
-> Authors, (`r format(Sys.Date(), "%Y")`). _Compendium of R code and data for `r Title`_. Accessed `r format(Sys.Date(), "%d %b %Y")`. Online at <https://doi.org/xxx/xxx>
+> Maynard, J. J., Yeboah, E., Owusu, S., Buenemann, M., Neff, J. C. and Herrick, J. E., (`r format(Sys.Date(), "%Y")`). _Compendium of R code and data for `r Title`_. Accessed `r format(Sys.Date(), "%d %b %Y")`. Online at <https://doi.org/xxx/xxx>
 
 ## Contents
 
@@ -66,13 +66,8 @@ You can download the compendium as a zip from from this URL:
 
 ### Licenses
 
-**Text and figures :**  [CC-BY-4.0](http://creativecommons.org/licenses/by/4.0/)
-
 **Code :** See the [DESCRIPTION](DESCRIPTION) file
 
 **Data :** [CC-0](http://creativecommons.org/publicdomain/zero/1.0/) attribution requested in reuse
 
-### Contributions
-
-We welcome contributions from everyone. Before you get started, please see our [contributor guidelines](CONTRIBUTING.md). Please note that this project is released with a [Contributor Code of Conduct](CONDUCT.md). By participating in this project you agree to abide by its terms.
 
