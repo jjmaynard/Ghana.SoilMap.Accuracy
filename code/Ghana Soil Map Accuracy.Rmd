@@ -1,0 +1,2814 @@
+---
+title: "Ghana Soil Map Accuracy"
+output: html_notebook
+---
+
+This notebook evaluates the relative and functional accuracy of four regional-to-global soil maps using the a dataset of 6,514 soil profile descriptions collected on smallholder farms using the LandPKS mobile application.  
+
+```{r message=FALSE, warning=FALSE}
+#set libary path
+required.packages <- c("sf", "readr", "dplyr", "tidyr", "purrr", "reticulate", "Rcpp", "foreach", "stringr", "tcltk", "utils", "iterators", "httr", "jsonlite", "doParallel", "here", "raster", "aqp", "GSIF","XML", "rgdal","gdalUtils", "rgeos", "measures", "ggplot2", "mapview", "leaflet", "leafem")
+new.packages <- required.packages[!(required.packages %in% installed.packages()[, 
+    "Package"])]
+if (length(new.packages)) install.packages(new.packages)
+lapply(required.packages, require, character.only = T)
+rm(required.packages, new.packages)
+
+#python location automatically set via command 'Sys.setenv(RETICULATE_PYTHON = "C:/Users/jmaynard/anaconda3/python.exe")' in project .Rprofile file. Check system environment paths using: Sys.getenv()
+
+no_cores <- detectCores() - 1  
+cl <- makeCluster(no_cores, type="SOCK", outfile = "")  
+registerDoParallel(cl)  
+getDoParWorkers()
+#options(stringsAsFactors = FALSE)
+#stopCluster(cl)
+```
+
+```{r}
+getCF_class <- function(cf){
+    if(is.na(cf)){
+        cf_g <-  NA
+    }else if(cf >= 0 & cf < 2){
+        cf_g <-  "0-1%"
+    }else if( cf >=2 & cf < 16){
+        cf_g <-  "1-15%"
+    }else if(cf >= 16 & cf < 36){
+        cf_g <-  "15-35%"
+    }else if(cf >= 36 & cf < 61){
+        cf_g <-  "35-60%"
+    }else if(cf >= 61 & cf <= 100){
+        cf_g <-  ">60%"
+    }
+    return(cf_g)
+}
+
+getCF_fromClass <- function(cf_class){
+    if(is.na(cf_class) | cf_class==""){
+        cf <-  NA
+    }else if(cf_class == "0-1%"){
+        cf <-  1
+    }else if(cf_class == "1-15%"){
+        cf <- 9.5 
+    }else if(cf_class == "15-35%"){
+        cf <- 26 
+    }else if(cf_class == "35-60%"){
+        cf <-  48.5
+    }else if(cf_class == ">60%"){
+        cf <- 80.5
+    }
+    return(cf)
+}
+
+
+
+
+getSand <- function(texture){
+        if(is.na(texture) | texture==""){
+          sand <- NA
+        }else{
+            txt_l <- stringr::str_to_lower(texture)
+            if(txt_l == "sand"){
+                sand <- 92.0
+            }else if(txt_l == "loamy sand"){
+                sand <- 80.0
+            }else if(txt_l == "sandy loam"){
+                sand <- 61.5
+            }else if(txt_l == "sandy clay loam"){
+                sand <- 62.5
+            }else if(txt_l == "loam"){
+                sand <- 37.5
+            }else if(txt_l == "silt"){
+                sand <- 10.0
+            }else if(txt_l == "silt loam"){
+                sand <- 25.0
+            }else if(txt_l == "silty clay loam"){
+                sand <- 10.0
+            }else if( txt_l == "clay loam"){
+                sand <- 32.5
+            }else if(txt_l == "sandy clay"){
+                sand <- 55.0
+            }else if(txt_l == "silty clay"){
+                sand <- 10.0
+            }else if(txt_l == "clay"){
+                sand <- 22.5
+            }}
+        return(sand)
+}
+            
+getClay <- function(texture){
+        if(is.na(texture) | texture==""){
+          clay <- NA
+        }else{
+            txt_l <- stringr::str_to_lower(texture)
+            if(txt_l == "sand"){
+                clay <- 5.0
+            }else if(txt_l == "loamy sand"){
+                clay <- 7.5
+            }else if(txt_l == "sandy loam"){
+                clay <- 10.0
+            }else if(txt_l == "sandy clay loam"){
+                clay <- 27.5
+            }else if(txt_l == "loam"){
+                clay <- 17.0
+            }else if(txt_l == "silt"){
+                clay <- 6.0
+            }else if(txt_l == "silt loam"){
+                clay <- 13.5
+            }else if(txt_l == "silty clay loam"){
+                clay <- 33.5
+            }else if( txt_l == "clay loam"){
+                clay <- 33.5
+            }else if(txt_l == "sandy clay"){
+                clay <- 45.0
+            }else if(txt_l == "silty clay"){
+                clay <- 50.0
+            }else if(txt_l == "clay"){
+                clay <- 70.0
+            }}
+        return(clay)
+}
+
+gettt <- function(sand, silt, clay){
+        if(is.na(sand) | is.na(silt) | is.na(clay)){
+            x = NA
+        } else if((silt + 1.5 * clay) < 15){
+            x = "Sand"
+        } else if((silt + 1.5 * clay) >= 15 & (silt + 2.0 * clay) < 30){
+            x = "Loamy sand"
+        } else if((clay >= 7) & (clay <= 20) & (sand > 52) & ((silt + 2.0 * clay) >= 30)){
+            x = "Sandy loam"
+        } else if((clay < 7) & (silt < 50) & ((silt + 2.0 * clay) >= 30)){
+            x = "Sandy loam"
+        } else if((clay >= 7) & (clay <= 27) & (silt >= 28) & (silt < 50) & (sand <= 52)){
+            x = "Loam"
+        } else if(((silt >= 50) & (clay >= 12) & (clay < 27)) | ((silt >= 50) & (silt < 80) & (clay < 12))){
+            x = "Silt loam"
+        } else if((silt >= 80) & (clay < 12)){
+            x = "Silt"
+        } else if((clay >= 20) & (clay < 35) & (silt < 28) & (sand > 45)){
+            x = "Sandy clay loam"
+        } else if((clay >= 27) & (clay < 40) & (sand > 20) & (sand <= 45)){
+            x = "Clay loam"
+        } else if((clay >= 27) & (clay < 40) & (sand <= 20)){
+            x = "Silty clay loam"
+        } else if((clay >= 35) & (sand >= 45)){
+            x = "Sandy clay"
+        } else if((clay >= 40) & (silt >= 40)){
+            x = "Silty clay"
+        } else if((clay >= 40) & (sand <= 45) & (silt < 40)){
+            x = "Clay"
+        }
+        return(x)
+}
+
+gettt_num <- function(sand, silt, clay){
+        if(is.na(sand) | is.na(silt) | is.na(clay)){
+            x = NA
+        } else if((silt==0 & clay==0 & sand==0)){
+            x = NA
+        } else if((silt + 1.5 * clay) < 15){
+            x = 12
+        } else if((silt + 1.5 * clay) >= 15 & (silt + 2.0 * clay) < 30){
+            x = 11
+        } else if((clay >= 7) & (clay <= 20) & (sand > 52) & ((silt + 2.0 * clay) >= 30)){
+            x = 9
+        } else if((clay < 7) & (silt < 50) & ((silt + 2.0 * clay) >= 30)){
+            x = 9
+        } else if((clay >= 7) & (clay <= 27) & (silt >= 28) & (silt < 50) & (sand <= 52)){
+            x = 7
+        } else if(((silt >= 50) & (clay >= 12) & (clay < 27)) | ((silt >= 50) & (silt < 80) & (clay < 12))){
+            x = 8
+        } else if((silt >= 80) & (clay < 12)){
+            x = 10
+        } else if((clay >= 20) & (clay < 35) & (silt < 28) & (sand > 45)){
+            x = 6
+        } else if((clay >= 27) & (clay < 40) & (sand > 20) & (sand <= 45)){
+            x = 4
+        } else if((clay >= 27) & (clay < 40) & (sand <= 20)){
+            x = 5
+        } else if((clay >= 35) & (sand >= 45)){
+            x = 3
+        } else if((clay >= 40) & (silt >= 40)){
+            x = 2
+        } else if((clay >= 40) & (sand <= 45) & (silt < 40)){
+            x = 1
+        }
+        return(x)
+}
+
+
+match <- function(ref, val){
+        if(is.na(ref) | is.na(val)){
+          match <- 0
+        } else if(stringr::str_to_lower(ref)==stringr::str_to_lower(val)){
+          match <- 1
+        } else{
+          match <- 0
+        }
+        return(match)
+}
+
+kstat <- function(a,b,mask="",perCategory=TRUE) {
+  ##################################################################################################
+  #Function: Calculate kappa indices and disagreements
+  calculateKappa <- function(ct){
+    KappaResult <- matrix()
+    ct <- ct/sum(ct)#percent of pixels 
+    cmax <- nrow(ct)#number of categories
+    #Fraction of Agreement:
+    PA <- 0
+    for (i in 1:cmax) {
+      PA <- PA+ct[i,i]
+    }
+    #Expected Fraction of Agreement subject to the observed distribution:
+    PE <- 0
+    for (i in 1:cmax) {
+      PE <- PE+sum(ct[i,])*sum(ct[,i])
+    }
+    #Maximum  Fraction  of  Agreement  subject  to  the  observed  distribution:
+    PMax <- 0
+    for (i in 1:cmax) {
+      PMax <- PMax+min(sum(ct[i,]),sum(ct[,i]))
+    }	
+    #Kappa Index:
+    K <- (PA-PE)/(1-PE)
+    #Kappa of location:
+    Kloc <- (PA-PE)/(PMax-PE)
+    #Kappa of histogram:
+    Khisto <- (PMax-PE)/(1-PE)
+    #chance agreement:
+    CA <- 100*min((1/cmax),PA,PE)
+    #quantity agreement:
+    QA <- ifelse(min((1/cmax),PE,PA)==(1/cmax),100*min((PE-1/cmax),PA-1/cmax),0)
+    #allocation agreement:
+    AA <- 100*max(PA-PE,0)
+    #allocation disagreement:
+    AD <- 100*(PMax-PA)
+    #quantity disagreement:
+    QD <- 100*(1-PMax)
+    KappaResult <- cbind(K,Kloc,Khisto,CA,QA,AA,AD,QD)	
+    return (KappaResult)
+  }
+  ##################################################################################################
+  #Initialise
+  if (class(a)=="RasterLayer"){
+    
+    if (any(dim(a)!=dim(b))){
+      stop ("Dimensions of a and b do not match!")
+    }
+    ct <- ctab(a,b,mask=mask)
+  }else{
+    ct <- table(a,b)
+  }
+  
+  result <- list()
+  #reclass to calculate kappa per category
+  cttmp <- ct
+  if (ncol(cttmp)<=2||perCategory==FALSE){
+    result[[1]] <- calculateKappa(ct)
+    if (perCategory==TRUE){
+      print ("Warning: Kappa per category requires at least 3 categories")
+    }
+  }
+  if (perCategory==TRUE&ncol(cttmp)>2) {
+    for (ca in 1:(ncol(cttmp)+1)){
+      if (ca==ncol(cttmp)+1) {
+        ct <- cttmp
+      } 
+      else {
+        ct <- cttmp
+        ctNew <- ct[1:2,1:2]
+        ctNew[1,1] <- ct[ca,ca]
+        ctNew[1,2] <- sum(ct[ca,])-ct[ca,ca]
+        ctNew[2,1] <- sum(ct[,ca])-ct[ca,ca]
+        ctNew[2,2] <- sum(ct)-sum(ct[ca,])-sum(ct[,ca])+ctNew[1,1]
+        ct <- ctNew
+      }
+      result[[ca]] <- calculateKappa(ct)
+    }
+  }
+  ##################################################################################################
+  #arrange results	
+  resultTab <- result[[1]]
+  if (length(result)>1){
+    for (i in 2:length(result)){
+      resultTab <- rbind(resultTab,result[[i]])
+    }
+  }
+  resultTab <- as.data.frame(resultTab)
+  colnames(resultTab) <- c("K","Kloc","Khisto","CA","QA","AA","AD","QD")
+  if (nrow(resultTab)>1){
+    row.names(resultTab) <- c(colnames(cttmp),"overall")	
+  }
+  else row.names(resultTab) <- "overall"
+  return (resultTab)
+}
+
+txt_adj <- function(x, y){
+  ifelse(x==1 & y %in% c(1,2,3,4,5), "Y", 
+    ifelse(x==2 & y %in% c(1,2,4,5), "Y",
+      ifelse(x==3 & y %in% c(1,3,5,6), "Y",     
+        ifelse(x==4 & y %in% c(2,4,5,8), "Y",     
+          ifelse(x==5 & y %in% c(1,3,5,6,9,8,4), "Y",   
+            ifelse(x==6 & y %in% c(1,3,5,6,9,10), "Y",
+              ifelse(x==7 & y %in% c(7,8), "Y",
+                ifelse(x==8 & y %in% c(4,7,8,9,10), "Y",
+                  ifelse(x==9 & y %in% c(4,5,6,8,9,10), "Y",
+                    ifelse(x==10 & y %in% c(6,9,8,11,10), "Y",     
+                      ifelse(x==11 & y %in% c(10,11,12), "Y",   
+                        ifelse(x==12 & y %in% c(11,12), "Y", 
+                          "N"))))))))))))
+  
+}
+
+mean_na <- function(x){
+  x_mean <- mean(x, na.rm=TRUE)
+  return(x_mean)
+}
+
+```
+
+# LPKS Data
+
+### Load in processed LandInfo data downloaded 11-6-2020.
+```{r}
+
+LPKS_Ghana_Soil_Data <- readRDS(here::here('data/derived_data/LPKS_Ghana_Soil_Data.RDS'))
+
+```
+
+# Load SoilGrids v2 from geotif files
+```{r}
+#create SoilGridsv2 folder
+dir.create(here('analysis/data/SoilGridsv2'))
+
+# function to download SoilGrids v2 data from ISRIC WCS
+sg2_download <-  function(voi, depth, quantile, layer_name, file.out){
+    voi_layer = paste(voi,depth,quantile, sep="_") 
+    
+    wcs_path = paste0("https://maps.isric.org/mapserv?map=/map/",voi,".map") # Path to the WCS. See maps.isric.org
+    wcs_service = "SERVICE=WCS"
+    wcs_version = "VERSION=2.0.1" # This works for gdal >=2.3; "VERSION=1.1.1" works with gdal < 2.3.
+    
+    wcs_request = "DescribeCoverage" 
+    
+    wcs = paste(wcs_path, wcs_service, wcs_version, wcs_request, sep="&")
+    
+    bb=c(-337500.000,1242500.000,152500.000,527500.000) # Example bounding box (homolosine)
+    igh='+proj=igh +lat_0=0 +lon_0=0 +datum=WGS84 +units=m +no_defs' # proj string for Homolosine projection
+    
+    l1 <- newXMLNode("WCS_GDAL")
+    l1.s <- newXMLNode("ServiceURL", wcs, parent=l1)
+    l1.l <- newXMLNode("CoverageName", layer_name, parent=l1)
+    
+    # Save to local disk
+    xml.out = "./sg.xml"
+    saveXML(l1, file = xml.out)
+    
+    gdal_translate(xml.out, file.out,
+        tr=c(250,250), projwin=bb,
+        projwin_srs =igh, co=c("TILED=YES","COMPRESS=DEFLATE","PREDICTOR=2","BIGTIFF=YES"),
+        verbose=TRUE
+    )
+}
+
+####Clay
+
+#Clay, mean, 0-5cm depth
+voi = "clay" # variable of interest
+depth = "0-5cm"
+quantile = "mean"
+file.out <- here('data/SoilGridsv2/SG2_Ghana_Clay_0-5_mean.tif')
+layer_name <- "clay_0-5cm_mean"
+sg2_download(voi, depth, quantile, layer_name, file.out)
+
+#Clay, mean, 5-15cm depth
+voi = "clay" # variable of interest
+depth = "5-15cm"
+quantile = "mean"
+file.out <- here('data/SoilGridsv2/SG2_Ghana_Clay_5-15_mean.tif')
+layer_name <- "clay_5-15cm_mean"
+sg2_download(voi, depth, quantile, layer_name, file.out)
+
+#Clay, mean, 15-30cm depth
+voi = "clay" # variable of interest
+depth = "15-30cm"
+quantile = "mean"
+file.out <- here('data/SoilGridsv2/SG2_Ghana_Clay_15-30_mean.tif')
+layer_name <- "clay_15-30cm_mean"
+sg2_download(voi, depth, quantile, layer_name, file.out)
+
+#Clay, mean, 30-60cm depth
+voi = "clay" # variable of interest
+depth = "30-60cm"
+quantile = "mean"
+file.out <- here('data/SoilGridsv2/SG2_Ghana_Clay_30-60_mean.tif')
+layer_name <- "clay_30-60cm_mean"
+sg2_download(voi, depth, quantile, layer_name, file.out)
+
+sg2_clay <- list.files(here('data/SoilGridsv2'), pattern='Clay', full.names = T)
+sg2_clay <- str_sort(sg2_clay, numeric = TRUE)
+sg2_clay_brick <- brick(stack(sg2_clay), filename=here('data/SoilGridsv2/SG2_Ghana_Clay_brick.tif'))
+sg2_clay_brick <- brick(here('data/SoilGridsv2/SG2_Ghana_Clay_brick.tif'))
+
+####Sand
+
+#Sand, mean, 0-5cm depth
+voi = "sand" # variable of interest
+depth = "0-5cm"
+quantile = "mean"
+file.out <- here('data/SoilGridsv2/SG2_Ghana_Sand_0-5_mean.tif')
+layer_name <- "sand_0-5cm_mean"
+sg2_download(voi, depth, quantile, layer_name, file.out)
+
+#Sand, mean, 5-15cm depth
+voi = "sand" # variable of interest
+depth = "5-15cm"
+quantile = "mean"
+file.out <- here('data/SoilGridsv2/SG2_Ghana_Sand_5-15_mean.tif')
+layer_name <- "sand_5-15cm_mean"
+sg2_download(voi, depth, quantile, layer_name, file.out)
+
+#Sand, mean, 15-30cm depth
+voi = "sand" # variable of interest
+depth = "15-30cm"
+quantile = "mean"
+file.out <- here('data/SoilGridsv2/SG2_Ghana_Sand_15-30_mean.tif')
+layer_name <- "sand_15-30cm_mean"
+sg2_download(voi, depth, quantile, layer_name, file.out)
+
+#Sand, mean, 30-60cm depth
+voi = "sand" # variable of interest
+depth = "30-60cm"
+quantile = "mean"
+file.out <- here('data/SoilGridsv2/SG2_Ghana_Sand_30-60_mean.tif')
+layer_name <- "sand_30-60cm_mean"
+sg2_download(voi, depth, quantile, layer_name, file.out)
+
+sg2_sand <- list.files(here('data/SoilGridsv2'), pattern='Sand', full.names = T)
+sg2_sand <- str_sort(sg2_sand, numeric = TRUE)
+sg2_sand_brick <- brick(stack(sg2_sand), filename=here('data/SoilGridsv2/SG2_Ghana_Sand_brick.tif'))
+sg2_sand_brick <- brick(here('data/SoilGridsv2/SG2_Ghana_Sand_brick.tif'))
+
+####Silt
+
+#Silt, mean, 0-5cm depth
+voi = "silt" # variable of interest
+depth = "0-5cm"
+quantile = "mean"
+file.out <- here('data/SoilGridsv2/SG2_Ghana_Silt_0-5_mean.tif')
+layer_name <- "silt_0-5cm_mean"
+sg2_download(voi, depth, quantile, layer_name, file.out)
+
+#Silt, mean, 5-15cm depth
+voi = "silt" # variable of interest
+depth = "5-15cm"
+quantile = "mean"
+file.out <- here('data/SoilGridsv2/SG2_Ghana_Silt_5-15_mean.tif')
+layer_name <- "silt_5-15cm_mean"
+sg2_download(voi, depth, quantile, layer_name, file.out)
+
+#Silt, mean, 15-30cm depth
+voi = "silt" # variable of interest
+depth = "15-30cm"
+quantile = "mean"
+file.out <- here('data/SoilGridsv2/SG2_Ghana_Silt_15-30_mean.tif')
+layer_name <- "silt_15-30cm_mean"
+sg2_download(voi, depth, quantile, layer_name, file.out)
+
+#Silt, mean, 30-60cm depth
+voi = "silt" # variable of interest
+depth = "30-60cm"
+quantile = "mean"
+file.out <- here('data/SoilGridsv2/SG2_Ghana_Silt_30-60_mean.tif')
+layer_name <- "silt_30-60cm_mean"
+sg2_download(voi, depth, quantile, layer_name, file.out)
+
+sg2_silt <- list.files(here('data/SoilGridsv2'), pattern='Silt', full.names = T)
+sg2_silt <- str_sort(sg2_silt, numeric = TRUE)
+sg2_silt_brick <- brick(stack(sg2_silt), filename=here('data/SoilGridsv2/SG2_Ghana_Silt_brick.tif'))
+sg2_silt_brick <- brick(here('data/SoilGridsv2/SG2_Ghana_Silt_brick.tif'))
+
+# functions to calculate texture class for each depth
+raster_texture_calc <- function(x, filename, fun) {
+  out <- brick(x, nl=1, values=FALSE)
+  out <- writeStart(out, filename, format='GTiff', overwrite=TRUE)
+  bs <- blockSize(x)
+  bs <- blockSize(x, minblocks=bs$n*20)
+  pb <- txtProgressBar(min = 1, max = bs$n, style=3)
+  todisk <- TRUE
+  for (i in 1:bs$n) {
+    v <- getValuesBlock(x, row=bs$row[i], nrows=bs$nrows[i] )
+    vv <- array(, dim=c(nrow(v),3))
+    vvv <- foreach.raster.process(v,vv, fun)
+    vvvv <- do.call("rbind", lapply(vvv, array))
+    out <- writeValues(out, vvvv, bs$row[i])
+    setTxtProgressBar(pb, i)
+  }
+  out <- writeStop(out)
+  return(out)
+  close(pb)
+}
+
+
+foreach.raster.process<-function(v, vv, fun){
+  vv <-foreach(i=1:nrow(v), .export = c('gettt_num')) %dopar% {   
+    vv[i,] <- apply(t(as.matrix(v[i,])), 1, fun)
+  }
+  
+}
+
+
+text_calc <- function(data){
+                      sand = data[[1]]
+                      silt = data[[2]]
+                      clay = data[[3]]
+                      factor=((sand*.1) + (silt*.1) + (clay*.1))/100
+                      sand = sand*0.1/factor
+                      silt = silt*0.1/factor
+                      clay = clay*0.1/factor
+                      texture_num = gettt_num(sand, silt, clay)
+                      return(texture_num)
+}
+
+# Depth 1
+sg2_ssc_l1 <- brick(stack(here('data/SoilGridsv2/SG2_Ghana_Sand_0-5_mean.tif'),here('data/SoilGridsv2/SG2_Ghana_Silt_0-5_mean.tif'),here('data/SoilGridsv2/SG2_Ghana_Clay_0-5_mean.tif')))
+sg2_ssc_l1 <-projectRaster(sg2_ssc_l1, crs = '+proj=longlat +datum=WGS84 +no_defs')
+sg2_ssc_l1_c <- crop(sg2_ssc_l1, extent(ghana))
+sg2_ssc_l1_m <- mask(sg2_ssc_l1_c, ghana)
+
+sl1_txt_class <- raster_texture_calc(x=sg2_ssc_l1_m, here('data/SoilGridsv2/SG2_Ghana_texture_0-5.tif'), fun=text_calc)
+
+# Depth 2
+sg2_ssc_l2 <- brick(stack(here('data/SoilGridsv2/SG2_Ghana_Sand_5-15_mean.tif'),here('data/SoilGridsv2/SG2_Ghana_Silt_5-15_mean.tif'),here('data/SoilGridsv2/SG2_Ghana_Clay_5-15_mean.tif')))
+sg2_ssc_l2 <-projectRaster(sg2_ssc_l2, crs = '+proj=longlat +datum=WGS84 +no_defs')
+sg2_ssc_l2_c <- crop(sg2_ssc_l2, extent(ghana))
+sg2_ssc_l2_m <- mask(sg2_ssc_l2_c, ghana)
+
+sl2_txt_class <- raster_texture_calc(sg2_ssc_l2_m, here('data/SoilGridsv2/SG2_Ghana_texture_5-15.tif'), fun=text_calc)
+
+# Depth 3
+sg2_ssc_l3 <- brick(stack(here('data/SoilGridsv2/SG2_Ghana_Sand_15-30_mean.tif'),here('data/SoilGridsv2/SG2_Ghana_Silt_15-30_mean.tif'),here('data/SoilGridsv2/SG2_Ghana_Clay_15-30_mean.tif')))
+sg2_ssc_l3 <-projectRaster(sg2_ssc_l3, crs = '+proj=longlat +datum=WGS84 +no_defs')
+sg2_ssc_l3_c <- crop(sg2_ssc_l3, extent(ghana))
+sg2_ssc_l3_m <- mask(sg2_ssc_l3_c, ghana)
+
+sl3_txt_class <- raster_texture_calc(sg2_ssc_l3_m, here('data/SoilGridsv2/SG2_Ghana_texture_15-30.tif'), fun=text_calc)
+
+
+# Depth 4
+sg2_ssc_l4 <- brick(stack(here('data/SoilGridsv2/SG2_Ghana_Sand_30-60_mean.tif'),here('data/SoilGridsv2/SG2_Ghana_Silt_30-60_mean.tif'),here('data/SoilGridsv2/SG2_Ghana_Clay_30-60_mean.tif')))
+sg2_ssc_l4 <-projectRaster(sg2_ssc_l4, crs = '+proj=longlat +datum=WGS84 +no_defs')
+sg2_ssc_l4_c <- crop(sg2_ssc_l4, extent(ghana))
+sg2_ssc_l4_m <- mask(sg2_ssc_l4_c, ghana)
+
+sl4_txt_class <- raster_texture_calc(sg2_ssc_l4_m, here('data/SoilGridsv2/SG2_Ghana_texture_30-60.tif'), fun=text_calc)
+
+
+SG2_texture_class_sl1_sl4 <- brick(stack(sl1_txt_class,sl2_txt_class,sl3_txt_class,sl4_txt_class), filename=here('data/SoilGridsv2/SG2_texture_class_sl1_sl4.tif'))
+
+SG2_texture_class_sl1_sl4 <- brick(here('data/SoilGridsv2/SG2_texture_class_sl1_sl4.tif'))
+
+
+####RFV
+#RFV, mean, 0-5cm depth
+voi = "cfvo" # variable of interest
+depth = "0-5cm"
+quantile = "mean"
+file.out <- here('data/SoilGridsv2/SG2_Ghana_RFV_0-5_mean.tif')
+layer_name <- "cfvo_0-5cm_mean"
+sg2_download(voi, depth, quantile, layer_name, file.out)
+
+#RFV, mean, 5-15cm depth
+voi = "cfvo" # variable of interest
+depth = "5-15cm"
+quantile = "mean"
+file.out <- here('data/SoilGridsv2/SG2_Ghana_RFV_5-15_mean.tif')
+layer_name <- "cfvo_5-15cm_mean"
+sg2_download(voi, depth, quantile, layer_name, file.out)
+
+#RFV, mean, 15-30cm depth
+voi = "cfvo" # variable of interest
+depth = "15-30cm"
+quantile = "mean"
+file.out <- here('data/SoilGridsv2/SG2_Ghana_RFV_15-30_mean.tif')
+layer_name <- "cfvo_15-30cm_mean"
+sg2_download(voi, depth, quantile, layer_name, file.out)
+
+#RFV, mean, 30-60cm depth
+voi = "cfvo" # variable of interest
+depth = "30-60cm"
+quantile = "mean"
+file.out <- here('data/SoilGridsv2/SG2_Ghana_RFV_30-60_mean.tif')
+layer_name <- "cfvo_30-60cm_mean"
+sg2_download(voi, depth, quantile, layer_name, file.out)
+
+
+sg2_rfv <- brick(stack(here('data/SoilGridsv2/SG2_Ghana_RFV_0-5_mean.tif'),here('data/SoilGridsv2/SG2_Ghana_RFV_5-15_mean.tif'),here('data/SoilGridsv2/SG2_Ghana_RFV_15-30_mean.tif'),here('data/SoilGridsv2/SG2_Ghana_RFV_30-60_mean.tif')))
+
+sg2_rfv <-projectRaster(sg2_rfv, crs = '+proj=longlat +datum=WGS84 +no_defs')
+sg2_rfv_c <- crop(sg2_rfv, extent(ghana))
+sg2_rfv_m <- mask(sg2_rfv_c, ghana)
+writeRaster(sg2_rfv_m, filename=here('data/SoilGridsv2/SG2_rfv_class_sl1_sl4.tif'), format="GTiff", overwrite=TRUE)
+sg2_rfv_brick <- brick(here('data/SoilGridsv2/SG2_rfv_class_sl1_sl4.tif'))
+
+#depth to bedrock
+sg1_bedrock <- raster(here::here('data/SoilGridsv2/BDRICM_M_250m_ll.tif'))
+
+
+```
+
+# Processing ISDA from geotif files
+```{r}
+#create ISDA folder
+dir.create(here('analysis/data/ISDA'))
+
+# Download ISDA soil layers for Ghana
+
+#clay
+system(paste0('gdal_translate /vsicurl/https://isdasoil.s3.amazonaws.com/soil_data/clay_content/clay_content.tif', " ", here('data/ISDA/ghana_clay.tif'), ' ', '-projwin -3.24437008301 11.0983409693 1.0601216976 4.7104621443 -projwin_srs EPSG:4326'))
+
+#sand
+system(paste0('gdal_translate /vsicurl/https://isdasoil.s3.amazonaws.com/soil_data/sand_content/sand_content.tif', " ", here('data/ISDA/ghana_sand.tif'), ' ', '-projwin -3.24437008301 11.0983409693 1.0601216976 4.7104621443 -projwin_srs EPSG:4326'))
+
+#silt
+system(paste0('gdal_translate /vsicurl/https://isdasoil.s3.amazonaws.com/soil_data/silt_content/silt_content.tif', " ", here('data/ISDA/ghana_silt.tif'), ' ', '-projwin -3.24437008301 11.0983409693 1.0601216976 4.7104621443 -projwin_srs EPSG:4326'))
+
+#texture_class
+system(paste0('gdal_translate /vsicurl/https://isdasoil.s3.amazonaws.com/soil_data/texture_class/texture_class.tif', " ", here('data/ISDA/ghana_texture.tif'), ' ', '-projwin -3.24437008301 11.0983409693 1.0601216976 4.7104621443 -projwin_srs EPSG:4326'))
+
+#rock fragments
+system(paste0('gdal_translate /vsicurl/https://isdasoil.s3.amazonaws.com/soil_data/stone_content/stone_content.tif', " ", here('data/ISDA/ghana_rfv.tif'), ' ', '-projwin -3.24437008301 11.0983409693 1.0601216976 4.7104621443 -projwin_srs EPSG:4326'))
+
+#bedrock depth
+system(paste0('gdal_translate /vsicurl/https://isdasoil.s3.amazonaws.com/soil_data/bedrock_depth/bedrock_depth.tif', " ", here('data/ISDA/ghana_bedrock.tif'), ' ', '-projwin -3.24437008301 11.0983409693 1.0601216976 4.7104621443 -projwin_srs EPSG:4326'))
+
+isda_clay <- brick(list.files(here('data/ISDA'), pattern='ghana_clay', full.names = T))
+isda_sand <- brick(list.files(here('data/ISDA'), pattern='ghana_sand', full.names = T))
+isda_silt <- brick(list.files(here('data/ISDA'), pattern='ghana_silt', full.names = T))
+isda_bedrock <- brick(list.files(here('data/ISDA'), pattern='ghana_bedrock', full.names = T))
+isda_rfv <- brick(list.files(here('data/ISDA'), pattern='ghana_rfv', full.names = T))
+isda_texture <- brick(list.files(here('data/ISDA'), pattern='ghana_texture', full.names = T))
+
+```
+
+# create spatial point file for 6K+ LPKS Ghana sites
+```{r}
+
+LPKS_Ghana_Soil.sf <- st_as_sf(x=LPKS_Ghana_Soil %>% dplyr::select(id, latitude, longitude) %>% distinct(), coords = c("longitude", "latitude"), crs = "+proj=longlat +datum=WGS84")
+```
+
+# Extract sg2 texture data for 6K+ LPKS Ghana sites
+```{r}
+#clay
+LPKS_Soil_Data.clay.sg2 <- raster::extract(sg2_clay_brick, LPKS_Ghana_Soil.sf) %>% as.data.frame() %>% purrr::set_names("0", "5", "15","30") %>% dplyr::mutate(id = LPKS_Ghana_Soil.sf$id) 
+LPKS_Soil_Data.clay.sg2 <- LPKS_Soil_Data.clay.sg2 %>% pivot_longer(cols = names(LPKS_Soil_Data.clay.sg2)[1]:names(LPKS_Soil_Data.clay.sg2)[4], names_to = "top", values_to = "clay")
+LPKS_Soil_Data.clay.sg2$top <- as.numeric(LPKS_Soil_Data.clay.sg2$top)
+LPKS_Soil_Data.clay.sg2 <- LPKS_Soil_Data.clay.sg2 %>% dplyr::mutate(bottom = if_else(top==0, 5, if_else(top==5,15,if_else(top==15, 30,if_else(top==30, 60, -999)))))
+LPKS_Soil_Data.clay.sg2 <- LPKS_Soil_Data.clay.sg2 %>% dplyr::filter(!is.na(clay)) %>% as.data.frame()
+#silt
+LPKS_Soil_Data.silt.sg2 <- raster::extract(sg2_silt_brick, LPKS_Ghana_Soil.sf) %>% as.data.frame() %>% purrr::set_names("0", "5", "15","30") %>% dplyr::mutate(id = LPKS_Ghana_Soil.sf$id) 
+LPKS_Soil_Data.silt.sg2 <- LPKS_Soil_Data.silt.sg2 %>% pivot_longer(cols = names(LPKS_Soil_Data.silt.sg2)[1]:names(LPKS_Soil_Data.silt.sg2)[4], names_to = "top", values_to = "silt")
+LPKS_Soil_Data.silt.sg2$top <- as.numeric(LPKS_Soil_Data.silt.sg2$top)
+LPKS_Soil_Data.silt.sg2 <- LPKS_Soil_Data.silt.sg2 %>% dplyr::mutate(bottom = if_else(top==0, 5, if_else(top==5,15,if_else(top==15, 30,if_else(top==30, 60, -999)))))
+LPKS_Soil_Data.silt.sg2 <- LPKS_Soil_Data.silt.sg2 %>% dplyr::filter(!is.na(silt)) %>% as.data.frame()
+#sand
+LPKS_Soil_Data.sand.sg2 <- raster::extract(sg2_sand_brick, LPKS_Ghana_Soil.sf) %>% as.data.frame() %>% purrr::set_names("0", "5", "15","30") %>% dplyr::mutate(id = LPKS_Ghana_Soil.sf$id) 
+LPKS_Soil_Data.sand.sg2 <- LPKS_Soil_Data.sand.sg2 %>% pivot_longer(cols = names(LPKS_Soil_Data.sand.sg2)[1]:names(LPKS_Soil_Data.sand.sg2)[4], names_to = "top", values_to = "sand")
+LPKS_Soil_Data.sand.sg2$top <- as.numeric(LPKS_Soil_Data.sand.sg2$top)
+LPKS_Soil_Data.sand.sg2 <- LPKS_Soil_Data.sand.sg2 %>% dplyr::mutate(bottom = if_else(top==0, 5, if_else(top==5,15,if_else(top==15, 30,if_else(top==30, 60, -999)))))
+LPKS_Soil_Data.sand.sg2 <- LPKS_Soil_Data.sand.sg2 %>% dplyr::filter(!is.na(sand)) %>% as.data.frame()
+#rfv
+LPKS_Soil_Data.rfv.sg2 <- raster::extract(sg2_rfv_brick, LPKS_Ghana_Soil.sf) %>% as.data.frame() %>% purrr::set_names("0", "5", "15","30") %>% dplyr::mutate(id = LPKS_Ghana_Soil.sf$id) 
+LPKS_Soil_Data.rfv.sg2 <- LPKS_Soil_Data.rfv.sg2 %>% pivot_longer(cols = names(LPKS_Soil_Data.rfv.sg2)[1]:names(LPKS_Soil_Data.rfv.sg2)[4], names_to = "top", values_to = "rfv")
+LPKS_Soil_Data.rfv.sg2$top <- as.numeric(LPKS_Soil_Data.rfv.sg2$top)
+LPKS_Soil_Data.rfv.sg2 <- LPKS_Soil_Data.rfv.sg2 %>% dplyr::mutate(bottom = if_else(top==0, 5, if_else(top==5,15,if_else(top==15, 30,if_else(top==30, 60, -999)))))
+LPKS_Soil_Data.rfv.sg2 <- LPKS_Soil_Data.rfv.sg2 %>% dplyr::filter(!is.na(rfv)) %>% as.data.frame()
+
+#combine tables
+LPKS_SG2_Data_aqp <- LPKS_Soil_Data.clay.sg2 %>% left_join(LPKS_Soil_Data.sand.sg2, by=c("id", "top", "bottom")) 
+LPKS_SG2_Data_aqp <- LPKS_SG2_Data_aqp  %>% left_join(LPKS_Soil_Data.silt.sg2, by=c("id", "top", "bottom")) 
+LPKS_SG2_Data_aqp <- LPKS_SG2_Data_aqp  %>% left_join(LPKS_Soil_Data.rfv.sg2, by=c("id", "top", "bottom"))
+
+depths(LPKS_SG2_Data_aqp) <- id ~ top + bottom
+
+LPKS_SG2.slab <- aqp::slab(LPKS_SG2_Data_aqp, fm = id ~ sand + silt + clay + rfv, slab.structure=c(0,10,20,50), slab.fun=mean_na)
+LPKS_SG2.slab <- LPKS_SG2.slab %>% dplyr::select(-c(contributing_fraction)) %>% spread(variable, value)
+LPKS_SG2.slab[ is.na(LPKS_SG2.slab) ] <- NA
+
+#bedrock
+LPKS_Soil_Data.bedrock.sg2 <- raster::extract(sg1_bedrock[[1]], LPKS_Ghana_Soil.sf) %>% as.data.frame() %>% purrr::set_names("bedrock") %>% dplyr::mutate(id = LPKS_Ghana_Soil.sf$id) 
+
+#combine tables
+LPKS_SG2_Data <- LPKS_SG2.slab %>% left_join(LPKS_Soil_Data.bedrock.sg2 %>% dplyr::mutate(id=as.character(id)), by=c("id")) 
+LPKS_SG2_Data <- LPKS_SG2_Data %>% dplyr::mutate(sand=sand*.1,silt=silt*.1,clay=clay*.1,rfv=rfv*.1)
+
+# correct for particle size class preditions so that sand+silt+clay=100
+LPKS_SG2_Data <- LPKS_SG2_Data  %>% rowwise() %>% dplyr::mutate(sand_c = sand*(100/(sand+silt+clay)), silt_c = silt*(100/(sand+silt+clay)), clay_c = clay*(100/(sand+silt+clay))) %>% ungroup() 
+LPKS_SG2_Data <- LPKS_SG2_Data  %>%  dplyr::select(id, top, bottom, sand=sand_c, silt=silt_c, clay=clay_c, rfv)
+LPKS_SG2_Data <- LPKS_SG2_Data %>% rowwise() %>% dplyr::mutate(texture = gettt(sand=sand, silt=silt, clay=clay)) %>% dplyr::mutate(rfv_class = getCF_class(rfv)) %>% ungroup() %>% as.data.frame()
+
+LPKS_SG2_Data <- LPKS_SG2_Data %>% dplyr::mutate(id=as.numeric(id)) %>% left_join(LPKS_Soil_Data.bedrock.sg2, by='id')
+
+LPKS_SG2_Data <- LPKS_SG2_Data %>% rowwise() %>% dplyr::mutate(bedrock = case_when(is.na(bedrock) ~"120",
+  TRUE ~ as.character(bedrock))) %>% dplyr::mutate(bedrock = case_when(bedrock>120 ~"120",
+  TRUE ~ as.character(bedrock))) %>% ungroup() %>% as.data.frame() %>% dplyr::mutate(bedrock = as.numeric(bedrock), bottom = as.numeric(bottom),top = as.numeric(top)) %>% distinct()
+LPKS_SG2_Data <- LPKS_SG2_Data %>% rowwise() %>% dplyr::mutate(texture = case_when(bedrock<=top ~ "bedrock",
+  TRUE ~ texture), rfv_class = case_when(bedrock<=top ~ "bedrock", TRUE ~ rfv_class)) %>% ungroup()
+LPKS_SG2_Data <- LPKS_SG2_Data %>% dplyr::group_by(id) %>% dplyr::filter(all(!is.na(texture)) & all(!is.na(rfv_class))) %>% ungroup()
+
+for(i in 1:nrow(LPKS_SG2_Data)){
+  if(LPKS_SG2_Data$texture[i]=="bedrock"){
+    LPKS_SG2_Data$sand[i] = -99
+    LPKS_SG2_Data$silt[i] = -99
+    LPKS_SG2_Data$clay[i] = -99
+    LPKS_SG2_Data$rfv[i] = -99
+  }
+}
+
+LPKS_SG2_Data <- LPKS_SG2_Data %>% rename(sand_sg=sand, silt_sg=silt, clay_sg=clay, rfv_sg=rfv, texture_sg=texture, rfv_class_sg=rfv_class,bedrock_sg=bedrock)
+LPKS_SG2_Data <- LPKS_SG2_Data %>% dplyr::mutate(id=as.character(id)) 
+saveRDS(LPKS_SG2_Data, here::here('data/LPKS_SG2_Data.RDS'))
+```
+
+
+# Load in SG2 data extracted at 6k+ LPKS sites in Ghana (This data file is in repository)
+```{r}
+LPKS_SG2_Data <- readRDS(here::here('data/LPKS_SG2_Data.RDS'))
+```
+
+# extract ISDAsoil data at LandPKS sites
+```{r}
+# extract isda texture data for 6K+ LPKS Ghana sites
+#clay
+LPKS_Soil_Data.clay.isda <- raster::extract(isda_clay[[1:2]], LPKS_Ghana_Soil.sf) %>% as.data.frame() %>% purrr::set_names("0", "20") %>% dplyr::mutate(id = LPKS_Ghana_Soil.sf$id) 
+LPKS_Soil_Data.clay.isda <- LPKS_Soil_Data.clay.isda %>% pivot_longer(cols = names(LPKS_Soil_Data.clay.isda)[1]:names(LPKS_Soil_Data.clay.isda)[2], names_to = "top", values_to = "clay")
+LPKS_Soil_Data.clay.isda$top <- as.numeric(LPKS_Soil_Data.clay.isda$top)
+LPKS_Soil_Data.clay.isda <- LPKS_Soil_Data.clay.isda %>% dplyr::mutate(bottom = if_else(top==0, 20, 50))
+LPKS_Soil_Data.clay.isda <- LPKS_Soil_Data.clay.isda %>% dplyr::filter(!is.na(clay)) %>% as.data.frame()
+#sand
+LPKS_Soil_Data.sand.isda <- raster::extract(isda_sand[[1:2]], LPKS_Ghana_Soil.sf) %>% as.data.frame() %>% purrr::set_names("0", "20") %>% dplyr::mutate(id = LPKS_Ghana_Soil.sf$id) 
+LPKS_Soil_Data.sand.isda <- LPKS_Soil_Data.sand.isda %>% pivot_longer(cols = names(LPKS_Soil_Data.sand.isda)[1]:names(LPKS_Soil_Data.sand.isda)[2], names_to = "top", values_to = "sand")
+LPKS_Soil_Data.sand.isda$top <- as.numeric(LPKS_Soil_Data.sand.isda$top)
+LPKS_Soil_Data.sand.isda <- LPKS_Soil_Data.sand.isda %>% dplyr::mutate(bottom = if_else(top==0, 20, 50))
+LPKS_Soil_Data.sand.isda <- LPKS_Soil_Data.sand.isda %>% dplyr::filter(!is.na(sand)) %>% as.data.frame()
+#silt
+LPKS_Soil_Data.silt.isda <- raster::extract(isda_silt[[1:2]], LPKS_Ghana_Soil.sf) %>% as.data.frame() %>% purrr::set_names("0", "20") %>% dplyr::mutate(id = LPKS_Ghana_Soil.sf$id) 
+LPKS_Soil_Data.silt.isda <- LPKS_Soil_Data.silt.isda %>% pivot_longer(cols = names(LPKS_Soil_Data.silt.isda)[1]:names(LPKS_Soil_Data.silt.isda)[2], names_to = "top", values_to = "silt")
+LPKS_Soil_Data.silt.isda$top <- as.numeric(LPKS_Soil_Data.silt.isda$top)
+LPKS_Soil_Data.silt.isda <- LPKS_Soil_Data.silt.isda %>% dplyr::mutate(bottom = if_else(top==0, 20, 50))
+LPKS_Soil_Data.silt.isda <- LPKS_Soil_Data.silt.isda %>% dplyr::filter(!is.na(silt)) %>% as.data.frame()
+#rfv
+LPKS_Soil_Data.rfv.isda <- raster::extract(isda_rfv[[1:2]], LPKS_Ghana_Soil.sf) %>% as.data.frame() %>% purrr::set_names("0", "20") %>% dplyr::mutate(id = LPKS_Ghana_Soil.sf$id) 
+LPKS_Soil_Data.rfv.isda <- LPKS_Soil_Data.rfv.isda %>% pivot_longer(cols = names(LPKS_Soil_Data.rfv.isda)[1]:names(LPKS_Soil_Data.rfv.isda)[2], names_to = "top", values_to = "rfv")
+LPKS_Soil_Data.rfv.isda$top <- as.numeric(LPKS_Soil_Data.rfv.isda$top)
+LPKS_Soil_Data.rfv.isda <- LPKS_Soil_Data.rfv.isda %>% dplyr::mutate(bottom = if_else(top==0, 20, 50))
+LPKS_Soil_Data.rfv.isda <- LPKS_Soil_Data.rfv.isda %>% dplyr::filter(!is.na(rfv)) %>% as.data.frame()
+
+#combine tables
+LPKS_ISDA_Data_aqp <- LPKS_Soil_Data.clay.isda %>% left_join(LPKS_Soil_Data.sand.isda, by=c("id", "top", "bottom")) 
+LPKS_ISDA_Data_aqp <- LPKS_ISDA_Data_aqp  %>% left_join(LPKS_Soil_Data.silt.isda, by=c("id", "top", "bottom")) 
+LPKS_ISDA_Data_aqp <- LPKS_ISDA_Data_aqp  %>% left_join(LPKS_Soil_Data.rfv.isda, by=c("id", "top", "bottom"))
+
+depths(LPKS_ISDA_Data_aqp) <- id ~ top + bottom
+
+LPKS_ISDA.slab <- aqp::slab(LPKS_ISDA_Data_aqp, fm = id ~ sand + silt + clay + rfv, slab.structure=c(0,10,20,50), slab.fun=mean_na)
+LPKS_ISDA.slab <- LPKS_ISDA.slab %>% dplyr::select(-c(contributing_fraction)) %>% spread(variable, value)
+LPKS_ISDA.slab[ is.na(LPKS_ISDA.slab) ] <- NA
+
+#bedrock
+LPKS_Soil_Data.bedrock.isda <- raster::extract(isda_bedrock[[1]], LPKS_Ghana_Soil.sf) %>% as.data.frame() %>% purrr::set_names("bedrock") %>% dplyr::mutate(id = LPKS_Ghana_Soil.sf$id) 
+
+#combine tables
+LPKS_ISDA_Data <- LPKS_ISDA.slab %>% left_join(LPKS_Soil_Data.bedrock.isda %>% dplyr::mutate(id = as.character(id)), by=c("id")) 
+
+# correct for particle size class preditions so that sand+silt+clay=100
+LPKS_ISDA_Data <- LPKS_ISDA_Data  %>% rowwise() %>% dplyr::mutate(sand_c = sand*(100/(sand+silt+clay)), silt_c = silt*(100/(sand+silt+clay)), clay_c = clay*(100/(sand+silt+clay))) %>% ungroup() 
+LPKS_ISDA_Data <- LPKS_ISDA_Data  %>%  dplyr::select(id, top,  bottom, sand=sand_c, silt=silt_c, clay=clay_c, rfv)
+LPKS_ISDA_Data <- LPKS_ISDA_Data %>% rowwise() %>% dplyr::mutate(texture = gettt(sand=sand, silt=silt, clay=clay)) %>% dplyr::mutate(rfv_class = getCF_class(rfv)) %>% ungroup() %>% as.data.frame()
+
+LPKS_ISDA_Data <- LPKS_ISDA_Data %>% dplyr::mutate(id=as.numeric(id)) %>% left_join(LPKS_Soil_Data.bedrock.isda, by='id')
+LPKS_ISDA_Data <- LPKS_ISDA_Data %>% rowwise() %>% dplyr::mutate(bedrock = case_when(is.na(bedrock) ~"120",
+  TRUE ~ as.character(bedrock))) %>% dplyr::mutate(bedrock = case_when(bedrock>120 ~"120",
+  TRUE ~ as.character(bedrock))) %>% ungroup() %>% as.data.frame() %>% dplyr::mutate(bedrock = as.numeric(bedrock), bottom = as.numeric(bottom),top = as.numeric(top)) %>% distinct()
+LPKS_ISDA_Data <- LPKS_ISDA_Data %>% rowwise() %>% dplyr::mutate(texture = case_when(bedrock<=top ~ "bedrock",
+  TRUE ~ texture), rfv_class = case_when(bedrock<=top ~ "bedrock", TRUE ~ rfv_class)) %>% ungroup()
+LPKS_ISDA_Data <- LPKS_ISDA_Data %>% dplyr::group_by(id) %>% dplyr::filter(all(!is.na(texture)) & all(!is.na(rfv_class))) %>% ungroup()
+
+for(i in 1:nrow(LPKS_ISDA_Data)){
+  if(LPKS_ISDA_Data$texture[i]=="bedrock"){
+    LPKS_ISDA_Data$sand[i] = -99
+    LPKS_ISDA_Data$silt[i] = -99
+    LPKS_ISDA_Data$clay[i] = -99
+    LPKS_ISDA_Data$rfv[i] = -99
+  }
+}
+
+LPKS_ISDA_Data <- LPKS_ISDA_Data %>% rename(sand_isda=sand, silt_isda=silt, clay_isda=clay, rfv_isda=rfv, texture_isda=texture, rfv_class_isda=rfv_class,bedrock_isda=bedrock)
+LPKS_ISDA_Data <- LPKS_ISDA_Data %>% dplyr::mutate(id=as.character(id)) 
+
+saveRDS(LPKS_ISDA_Data, here::here('data/derived_data/LPKS_ISDA_Data.RDS'))
+
+```
+
+# Load in ISDA data extracted at 6k+ LPKS sites in Ghana (This data file is in repository)
+```{r}
+LPKS_ISDA_Data <- readRDS(here::here('data/derived_data/LPKS_ISDA_Data.RDS'))
+```
+
+# HWSD
+To run this code chunk, you must first download HWSD v1.2 data and place it in a 'data' subfolder labeled 'HWSD' 
+```{r}
+#create HWSD folder
+dir.create(here('analysis/data/HWSD'))
+
+#Load in HWSD .bil file downloaded from IIASA
+hwsd <- raster(here("data", "HWSD", "hwsd.bil"))
+proj4string(hwsd) <- "+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0"
+
+#extract mapunit codes at LPKS points
+LPKS_hwsd_mu <- raster::extract(hwsd, LPKS_Ghana_Soil.sf) %>% as.data.frame() %>% set_names('mu_code')
+
+
+# Connect to geodatabase
+HWSD_DATA_layers <- st_layers(dsn=here("data",  "HWSD", "HWSD_DATA.gdb"))
+HWSD_DATA_data <- st_read(dsn=here("data",  "HWSD", "HWSD_DATA.gdb"), layer='HWSD_DATA')
+
+LandPKS_HWSD_list <- list(list())
+for(i in 1:nrow(LPKS_hwsd_mu)){
+  soil <- HWSD_DATA_data %>% dplyr::filter(MU_GLOBAL==LPKS_hwsd_mu$mu_code[i])
+  soil <- soil %>% dplyr::slice_max(SHARE)
+  if(nrow(soil)>1){
+    soil <- soil %>% dplyr::arrange(desc(REF_DEPTH)) %>% dplyr::slice_head()
+  }
+  if(soil$REF_DEPTH<100){
+    soil_df <- soil %>% dplyr::select(hwsdID=ID, MU_GLOBAL, SHARE, REF_DEPTH, rfv=T_GRAVEL, sand=T_SAND, silt=T_SILT, clay=T_CLAY) %>% dplyr::mutate(top=0, bottom=REF_DEPTH, id=LPKS_Ghana_Soil.sf$id[i])
+  }else{
+    top <- soil %>% dplyr::select(hwsdID=ID, MU_GLOBAL, SHARE, REF_DEPTH, rfv=T_GRAVEL, sand=T_SAND, silt=T_SILT, clay=T_CLAY) %>% dplyr::mutate(top=0, bottom=30, id=LPKS_Ghana_Soil.sf$id[i])
+    bottom <- soil %>% dplyr::select(hwsdID=ID, MU_GLOBAL, SHARE, REF_DEPTH, rfv=S_GRAVEL, sand=S_SAND, silt=S_SILT, clay=S_CLAY) %>% dplyr::mutate(top=30, bottom=100, id=LPKS_Ghana_Soil.sf$id[i])
+    soil_df <- bind_rows(top, bottom)
+  }
+  LandPKS_HWSD_list[[i]] <- soil_df 
+}
+
+
+LPKS_Ghana_HWSD <- bind_rows(LandPKS_HWSD_list)
+
+LPKS_Ghana_HWSD_aqp <- LPKS_Ghana_HWSD
+
+depths(LPKS_Ghana_HWSD_aqp) <- id ~ top + bottom
+
+LPKS_HWSD.slab <- aqp::slab(LPKS_Ghana_HWSD_aqp, fm = id ~ sand + silt + clay + rfv, slab.structure=c(0,10,20,50), slab.fun=mean_na)
+LPKS_HWSD.slab <- LPKS_HWSD.slab %>% dplyr::select(-c(contributing_fraction)) %>% spread(variable, value)
+LPKS_HWSD.slab[ is.na(LPKS_HWSD.slab) ] <- NA
+
+#bedrock
+LPKS_Ghana_HWSD_Data <- LPKS_Ghana_HWSD %>% dplyr::select(id, MU_GLOBAL, SHARE, bedrock=REF_DEPTH, hwsdID)
+LPKS_Ghana_HWSD_Data <- LPKS_Ghana_HWSD_Data %>% dplyr::mutate(id = id %>% as.character())
+#combine tables
+LPKS_Ghana_HWSD_Data <- LPKS_Ghana_HWSD_Data %>% inner_join(LPKS_HWSD.slab, by=c("id")) 
+
+# correct for particle size class preditions so that sand+silt+clay=100
+LPKS_Ghana_HWSD_Data <- LPKS_Ghana_HWSD_Data  %>% rowwise() %>% dplyr::mutate(sand_c = sand*(100/(sand+silt+clay)), silt_c = silt*(100/(sand+silt+clay)), clay_c = clay*(100/(sand+silt+clay))) %>% ungroup() 
+LPKS_Ghana_HWSD_Data <- LPKS_Ghana_HWSD_Data  %>%  dplyr::select(id, top, bottom, sand=sand_c, silt=silt_c, clay=clay_c, rfv, bedrock)
+LPKS_Ghana_HWSD_Data <- LPKS_Ghana_HWSD_Data %>% rowwise() %>% dplyr::mutate(texture = gettt(sand=sand, silt=silt, clay=clay)) %>% dplyr::mutate(rfv_class = getCF_class(rfv)) %>% ungroup() %>% as.data.frame()
+
+LPKS_Ghana_HWSD_Data <- LPKS_Ghana_HWSD_Data %>% rowwise() %>% dplyr::mutate(bedrock = case_when(is.na(bedrock) ~"120",
+  TRUE ~ as.character(bedrock))) %>% dplyr::mutate(bedrock = case_when(bedrock>120 ~"120",
+  TRUE ~ as.character(bedrock))) %>% ungroup() %>% as.data.frame() %>% dplyr::mutate(bedrock = as.numeric(bedrock), bottom = as.numeric(bottom),top = as.numeric(top)) %>% distinct()
+LPKS_Ghana_HWSD_Data <- LPKS_Ghana_HWSD_Data %>% rowwise() %>% dplyr::mutate(texture = case_when(bedrock<=top ~ "bedrock",
+  TRUE ~ texture), rfv_class = case_when(bedrock<=top ~ "bedrock", TRUE ~ rfv_class)) %>% ungroup()
+LPKS_Ghana_HWSD_Data <- LPKS_Ghana_HWSD_Data %>% dplyr::group_by(id) %>% dplyr::filter(all(!is.na(texture)) & all(!is.na(rfv_class))) %>% ungroup()
+
+for(i in 1:nrow(LPKS_Ghana_HWSD_Data)){
+  if(LPKS_Ghana_HWSD_Data$texture[i]=="bedrock"){
+    LPKS_Ghana_HWSD_Data$sand[i] = -99
+    LPKS_Ghana_HWSD_Data$silt[i] = -99
+    LPKS_Ghana_HWSD_Data$clay[i] = -99
+    LPKS_Ghana_HWSD_Data$rfv[i] = -99
+  }
+}
+
+LPKS_Ghana_HWSD_Data <- LPKS_Ghana_HWSD_Data %>% rename(sand_hwsd=sand, silt_hwsd=silt, clay_hwsd=clay, rfv_hwsd=rfv, bedrock_hwsd=bedrock, texture_hwsd=texture, rfv_class_hwsd=rfv_class) %>% distinct()
+LPKS_Ghana_HWSD_Data <- LPKS_Ghana_HWSD_Data %>% dplyr::mutate(id=as.character(id)) 
+
+saveRDS(LPKS_Ghana_HWSD_Data, here::here('data/LPKS/LPKS_Ghana_HWSD_Data.RDS'))
+LPKS_Ghana_HWSD_Data <- readRDS(here::here('data/LPKS/LPKS_Ghana_HWSD_Data.RDS'))
+```
+
+# WISE30sec
+To run this code chunk, you must first download WISE30sec data from ISRIC and place it in a 'data' subfolder labeled 'WISE' 
+```{r}
+#create WISE folder
+dir.create(here('analysis/data/WISE'))
+
+#Load in WISE30sec '.tif' file downloaded from ISRIC
+wise_rast <- raster(here("data",  "WISE", "wise30sec_fin.tif"))
+proj4string(wise_rast) <- "+proj=longlat +datum=WGS84 +ellps=WGS84 +towgs84=0,0,0"
+
+#extract mapunit codes at LPKS points
+LPKS_wise_mu <- raster::extract(wise_rast, LPKS_Ghana_Soil.sf) %>% as.data.frame() %>% set_names('mu_code')
+
+#Load in WISE30sec data
+wise30sec_data <- read.csv(here("data",  "WISE", "wise_full_soil.csv"), header=T)
+
+LandPKS_WISE_list <- list(list())
+for(i in 1:nrow(LPKS_hwsd_mu)){
+  soil <- wise30sec_data %>% dplyr::filter(MUGLB_NEW==LPKS_wise_mu$mu_code[i])
+  soil_id <- soil %>% dplyr::slice_max(PROP) %>% dplyr::select(SCID) %>% distinct() %>% pull()
+  if(length(soil_id)>1){
+    soil_id <- soil %>% dplyr::select(SCID, REF_DEPTH) %>% distinct() %>% dplyr::arrange(desc(REF_DEPTH)) %>% dplyr::slice_head() %>% dplyr::select(SCID) %>% pull()
+    soil_df <- soil %>% dplyr::filter(SCID==soil_id) %>% dplyr::select(MUGLB_NEW, MU_GLOBAL, PROP, top=TopDep, bottom=BotDep, sand=SDTO, silt=STPC, clay=CLPC, rfv=CFRAG, bedrock=REF_DEPTH) %>% dplyr::mutate(id=LPKS_Ghana_Soil.sf$id[i])
+  }else{
+    soil_df <- soil %>% dplyr::filter(SCID==soil_id) %>% dplyr::select(MUGLB_NEW, MU_GLOBAL, PROP, top=TopDep, bottom=BotDep, sand=SDTO, silt=STPC, clay=CLPC, rfv=CFRAG, bedrock=REF_DEPTH) %>% dplyr::mutate(id=LPKS_Ghana_Soil.sf$id[i])
+  }
+  
+  LandPKS_WISE_list[[i]] <- soil_df 
+}
+
+LPKS_Ghana_WISE <- bind_rows(LandPKS_WISE_list)
+
+LPKS_Ghana_WISE_aqp <- LPKS_Ghana_WISE
+
+depths(LPKS_Ghana_WISE_aqp) <- id ~ top + bottom
+
+LPKS_WISE.slab <- aqp::slab(LPKS_Ghana_WISE_aqp, fm = id ~ sand + silt + clay + rfv, slab.structure=c(0,10,20,50), slab.fun=mean_na)
+LPKS_WISE.slab <- LPKS_WISE.slab %>% dplyr::select(-c(contributing_fraction)) %>% spread(variable, value)
+LPKS_WISE.slab[ is.na(LPKS_WISE.slab) ] <- NA
+
+
+#bedrock
+LPKS_Ghana_WISE_Data <- LPKS_Ghana_WISE %>% dplyr::select(id, MUGLB_NEW, MU_GLOBAL, PROP, bedrock)
+LPKS_Ghana_WISE_Data <- LPKS_Ghana_WISE_Data %>% dplyr::mutate(id = id %>% as.character())
+#combine tables
+LPKS_Ghana_WISE_Data <- LPKS_Ghana_WISE_Data %>% inner_join(LPKS_WISE.slab, by=c("id"))
+
+
+# correct for particle size class preditions so that sand+silt+clay=100
+LPKS_Ghana_WISE_Data <- LPKS_Ghana_WISE_Data  %>% rowwise() %>% dplyr::mutate(sand_c = sand*(100/(sand+silt+clay)), silt_c = silt*(100/(sand+silt+clay)), clay_c = clay*(100/(sand+silt+clay))) %>% ungroup() 
+LPKS_Ghana_WISE_Data <- LPKS_Ghana_WISE_Data  %>%  dplyr::select(id, top, bottom, sand=sand_c, silt=silt_c, clay=clay_c, rfv, bedrock)
+LPKS_Ghana_WISE_Data <- LPKS_Ghana_WISE_Data %>% rowwise() %>% dplyr::mutate(texture = gettt(sand=sand, silt=silt, clay=clay)) %>% dplyr::mutate(rfv_class = getCF_class(rfv)) %>% ungroup() %>% as.data.frame()
+
+LPKS_Ghana_WISE_Data <- LPKS_Ghana_WISE_Data %>% rowwise() %>% dplyr::mutate(bedrock = case_when(is.na(bedrock) ~"120",
+  TRUE ~ as.character(bedrock))) %>% dplyr::mutate(bedrock = case_when(bedrock>120 ~"120",
+  TRUE ~ as.character(bedrock))) %>% ungroup() %>% as.data.frame() %>% dplyr::mutate(bedrock = as.numeric(bedrock), bottom = as.numeric(bottom),top = as.numeric(top)) %>% distinct()
+LPKS_Ghana_WISE_Data <- LPKS_Ghana_WISE_Data %>% rowwise() %>% dplyr::mutate(texture = case_when(bedrock<=top ~ "bedrock",
+  TRUE ~ texture), rfv_class = case_when(bedrock<=top ~ "bedrock", TRUE ~ rfv_class)) %>% ungroup()
+LPKS_Ghana_WISE_Data <- LPKS_Ghana_WISE_Data %>% dplyr::group_by(id) %>% dplyr::filter(all(!is.na(texture)) & all(!is.na(rfv_class))) %>% ungroup()
+
+for(i in 1:nrow(LPKS_Ghana_WISE_Data)){
+  if(LPKS_Ghana_WISE_Data$texture[i]=="bedrock"){
+    LPKS_Ghana_WISE_Data$sand[i] = -99
+    LPKS_Ghana_WISE_Data$silt[i] = -99
+    LPKS_Ghana_WISE_Data$clay[i] = -99
+    LPKS_Ghana_WISE_Data$rfv[i] = -99
+  }
+}
+
+LPKS_Ghana_WISE_Data <- LPKS_Ghana_WISE_Data %>% rename(sand_wise=sand, silt_wise=silt, clay_wise=clay, rfv_wise=rfv, bedrock_wise=bedrock, texture_wise=texture, rfv_class_wise=rfv_class) %>% distinct()
+LPKS_Ghana_WISE_Data <- LPKS_Ghana_WISE_Data %>% dplyr::mutate(id=as.character(id)) 
+
+saveRDS(LPKS_Ghana_WISE_Data, here::here('data/LPKS/LPKS_Ghana_WISE_Data.RDS'))
+LPKS_Ghana_WISE_Data <- readRDS(here::here('data/LPKS/LPKS_Ghana_WISE_Data.RDS'))
+
+```
+
+
+
+# Join data extracted at LPKS sites
+```{r}
+LPKS_Soil_Map_Data <- LPKS_Ghana_Soil_Data %>% inner_join(LPKS_SG2_Data, by=c("id"="id", "top"="top", "bottom"="bottom"))
+LPKS_Soil_Map_Data <- LPKS_Soil_Map_Data %>% inner_join(LPKS_ISDA_Data, by=c("id"="id", "top"="top", "bottom"="bottom"))
+LPKS_Soil_Map_Data <- LPKS_Soil_Map_Data %>% inner_join(LPKS_Ghana_HWSD_Data, by=c("id"="id", "top"="top", "bottom"="bottom"))
+LPKS_Soil_Map_Data <- LPKS_Soil_Map_Data %>% inner_join(LPKS_Ghana_WISE_Data, by=c("id"="id", "top"="top", "bottom"="bottom"))
+LPKS_Soil_Map_Data <- LPKS_Soil_Map_Data %>% distinct()
+LPKS_Soil_Map_Data$bottom <- as.integer(LPKS_Soil_Map_Data$bottom)
+LPKS_Soil_Map_Data <- LPKS_Soil_Map_Data %>%  dplyr::mutate(texture_hwsd = replace_na(texture_hwsd, "bedrock"), texture_wise = replace_na(texture_wise, "bedrock"), rfv_class_hwsd = replace_na(rfv_class_hwsd, "bedrock"),rfv_class_wise = replace_na(rfv_class_wise, "bedrock"))
+
+saveRDS(LPKS_Soil_Map_Data, here::here('data/LPKS/LPKS_Soil_Map_Data.RDS'))
+LPKS_Soil_Map_Data <- readRDS(here::here('data/LPKS/LPKS_Soil_Map_Data.RDS'))
+```
+
+```{r}
+#texture and rfv class lookup tables
+Text_class_lookup <- read.csv("C:/R_Drive/Data_Files/LPKS_Data/R_Projects/SoilID/data/raw_data/Text_class_lookup.csv", header=T)
+Text_class_lookup <- Text_class_lookup[-3,]
+Text_class_lookup <- Text_class_lookup[-5,]
+rfv_lookup <- data.frame(c("0-1%",   "1-15%",  "15-35%", "35-60%", ">60%", "bedrock" ), c(1:5, 99)) %>% purrr::set_names('class', 'class_num')
+
+
+```
+
+# Evaluate map accuracy for all 6,514 sites
+```{r}
+# calculate matches
+LPKS_Soil_Map_Data <- LPKS_Soil_Map_Data %>% rowwise() %>%
+      dplyr::mutate(wise_txt_m = match(texture, texture_wise)) %>%
+      dplyr::mutate(hwsd_txt_m = match(texture, texture_hwsd)) %>%
+      dplyr::mutate(sg_txt_m = match(texture, texture_sg)) %>%
+      dplyr::mutate(isda_txt_m = match(texture, texture_isda)) %>%
+      dplyr::mutate(wise_rfv_m = match(rfv_class, rfv_class_wise)) %>%
+      dplyr::mutate(hwsd_rfv_m = match(rfv_class, rfv_class_hwsd)) %>%
+      dplyr::mutate(sg_rfv_m = match(rfv_class, rfv_class_sg)) %>%
+      dplyr::mutate(isda_rfv_m = match(rfv_class, rfv_class_isda)) %>%
+      ungroup()
+
+#Frequency Tablesm                           
+txt_m <- LPKS_Soil_Map_Data %>% dplyr::select(wise_txt_m,hwsd_txt_m,sg_txt_m,isda_txt_m)
+gather(txt_m, "var", "value") %>%
+  count(var, value) %>%
+  dplyr::group_by(var) %>%             # now required with changes to dplyr::count()
+  dplyr::mutate(prop = prop.table(n))
+
+rfv_m <- LPKS_Soil_Map_Data %>% dplyr::select(wise_rfv_m,hwsd_rfv_m,sg_rfv_m,isda_rfv_m)
+gather(rfv_m, "var", "value") %>%
+  count(var, value) %>%
+  dplyr::group_by(var) %>%             # now required with changes to dplyr::count()
+  dplyr::mutate(prop = prop.table(n))
+
+texture <- LPKS_Soil_Map_Data %>% dplyr::select(texture, texture_wise, texture_hwsd, texture_sg, texture_isda)
+texture_freq <- gather(texture, "var", "value") %>%
+  count(var, value) %>%
+  dplyr::group_by(var) %>%             # now required with changes to dplyr::count()
+  dplyr::mutate(prop = prop.table(n))
+
+texture_freq$value <- factor(texture_freq$value, levels=c("bedrock", "Clay", "Silty clay", "Sandy clay", "Silty clay loam", "Clay loam", "Sandy clay loam", "Silt loam", "Loam", "Sandy loam", "Loamy sand", "Sand"))
+col_pal <- c('black', '#67001f','#b2182b','#d6604d','#f4a582','#fddbc7','#f7f7f7','#d1e5f0','#92c5de','#4393c3','#2166ac','#053061')
+p <- qplot(x = value, y = prop, fill = value, data = texture_freq, ylim=c(0,0.65), geom = "col")
+
+pdf(here("analysis/figures/Ghana_soil_map_texture_freq_sites.pdf"), width = 14, height = 7)
+p + facet_wrap(~var) + scale_fill_manual(values=c('black','#67001f','#b2182b','#d6604d','#f4a582','#fddbc7','#f7f7f7','#d1e5f0','#92c5de','#4393c3','#2166ac','#053061')) + geom_col(color = "black", size = .5)
+dev.off()
+
+rfv_class <- LPKS_Soil_Map_Data %>% dplyr::select(rfv_class, rfv_class_wise, rfv_class_hwsd, rfv_class_sg, rfv_class_isda)
+rfv_class_freq <- gather(rfv_class, "var", "value") %>%
+  count(var, value) %>%
+  dplyr::group_by(var) %>%             # now required with changes to dplyr::count()
+  dplyr::mutate(prop = prop.table(n))
+
+
+
+rfv_class_freq <- rfv_class_freq %>% dplyr::mutate(prop = round(prop*100)) %>% dplyr::filter(value != "")
+rfv_class_freq$value <- factor(rfv_class_freq$value, levels=c("0-1%", "1-15%", "15-35%", "35-60%", ">60%", "bedrock"))
+p <- qplot(x = value, y = prop, fill = value, data = rfv_class_freq, ylim=c(0,100), geom = "col") + scale_x_discrete(drop=FALSE)
+
+pdf(here("analysis/figures/Ghana_soil_map_rfv_freq_sites.pdf"), width = 10, height = 7)
+p + facet_wrap(~var) + scale_fill_manual(values=rev(c('black', '#67001f','#b2182b','#d6604d','#f4a582','#fddbc7')),drop=FALSE) + geom_col(color = "black", size = .5)
+dev.off()
+
+texture <- LPKS_Soil_Map_Data %>% dplyr::select(texture, texture_wise, texture_hwsd, texture_sg, texture_isda)
+texture <- texture %>% dplyr::filter(!texture=="") %>% ungroup()
+texture <- texture %>% transmute_if(is.character,tolower)
+#lpks
+texture$lpks_num <- texture %>% inner_join(Text_class_lookup %>% dplyr::select(text_class, lpks), by=c('texture'='text_class')) %>% dplyr::select(lpks) %>% pull()
+#wise
+texture$wise_num <- texture %>% inner_join(Text_class_lookup %>% dplyr::select(text_class, lpks), by=c('texture_wise'='text_class')) %>% dplyr::select(lpks) %>% pull()
+#hwsd
+texture$hwsd_num <- texture %>% inner_join(Text_class_lookup %>% dplyr::select(text_class, lpks), by=c('texture_hwsd'='text_class')) %>% dplyr::select(lpks) %>% pull()
+#sg
+texture$sg_num <- texture %>% inner_join(Text_class_lookup %>% dplyr::select(text_class, lpks), by=c('texture_sg'='text_class')) %>% dplyr::select(lpks) %>% pull()
+#isda
+texture$isda_num <- texture %>% inner_join(Text_class_lookup %>% dplyr::select(text_class, lpks), by=c('texture_isda'='text_class')) %>% dplyr::select(lpks) %>% pull()
+
+
+
+texture <- texture %>% rowwise() %>% dplyr::mutate(wise_adj=txt_adj(lpks_num,wise_num)) %>%
+                                     dplyr::mutate(hwsd_adj=txt_adj(lpks_num,hwsd_num)) %>%
+                                     dplyr::mutate(sg_adj=txt_adj(lpks_num,sg_num)) %>%
+                                     dplyr::mutate(isda_adj=txt_adj(lpks_num,isda_num)) %>% ungroup()
+#wise                        
+wise_adj_sum <- summary(texture$wise_adj %>% factor())
+wise_adj_sum[[2]]/19542
+#hwsd                        
+hwsd_adj_sum <- summary(texture$hwsd_adj %>% factor())
+hwsd_adj_sum[[2]]/19542
+#isda                        
+isda_adj_sum <- summary(texture$isda_adj %>% factor())
+isda_adj_sum[[2]]/19542
+#sg                        
+sg_adj_sum <- summary(texture$sg_adj %>% factor())
+sg_adj_sum[[2]]/19542
+
+lpks_truth <- factor(texture$texture, levels=Text_class_lookup$text_class)
+wise <- factor(texture$texture_wise, levels=Text_class_lookup$text_class)
+hwsd <- factor(texture$texture_hwsd, levels=Text_class_lookup$text_class)
+sg <- factor(texture$texture_sg, levels=Text_class_lookup$text_class)
+isda <- factor(texture$texture_isda, levels=Text_class_lookup$text_class)
+
+wise_cc <- table(wise,lpks_truth)
+hwsd_cc <- table(hwsd,lpks_truth)
+sg_cc <- table(sg,lpks_truth)
+isda_cc <- table(isda,lpks_truth)
+caret::confusionMatrix(wise_cc)
+caret::confusionMatrix(hwsd_cc)
+caret::confusionMatrix(sg_cc)
+caret::confusionMatrix(isda_cc)
+
+#precision=user's accuracy, recall=producer's accuracy
+caret::confusionMatrix(wise_cc, mode = "prec_recall")
+caret::confusionMatrix(hwsd_cc, mode = "prec_recall")
+caret::confusionMatrix(sg_cc, mode = "prec_recall")
+caret::confusionMatrix(isda_cc, mode = "prec_recall")
+
+library(measures)
+ACC(lpks_truth,wise)
+BER(lpks_truth,wise)
+
+ACC(lpks_truth,hwsd)
+BER(lpks_truth,hwsd)
+
+ACC(lpks_truth,sg)
+BER(lpks_truth,sg)
+
+ACC(lpks_truth,isda)
+BER(lpks_truth,isda)
+
+
+#load kstat function
+#install_github('environmentalinformatics-marburg/Rsenal')
+
+
+rfv_class <- LPKS_Soil_Map_Data %>% dplyr::select(rfv_class, rfv_class_wise, rfv_class_hwsd, rfv_class_sg, rfv_class_isda)
+rfv_class <- rfv_class %>% dplyr::filter(!rfv_class=="") %>% ungroup()
+rfv_class <- rfv_class %>% transmute_if(is.character,tolower)
+
+#lpks
+rfv_class$lpks_num <- rfv_class %>% inner_join(rfv_lookup, by=c('rfv_class'='class')) %>% dplyr::select(class_num) %>% pull()
+#wise
+rfv_class$wise_num <- rfv_class %>% inner_join(rfv_lookup, by=c('rfv_class_wise'='class')) %>% dplyr::select(class_num) %>% pull()
+#hwsd
+rfv_class$hwsd_num <- rfv_class %>% inner_join(rfv_lookup, by=c('rfv_class_hwsd'='class')) %>% dplyr::select(class_num) %>% pull()
+#sg
+rfv_class$sg_num <- rfv_class %>% inner_join(rfv_lookup, by=c('rfv_class_sg'='class')) %>% dplyr::select(class_num) %>% pull()
+#isda
+rfv_class$isda_num <- rfv_class %>% inner_join(rfv_lookup, by=c('rfv_class_isda'='class')) %>% dplyr::select(class_num) %>% pull()
+
+rfv_class <- rfv_class %>% rowwise() %>% dplyr::mutate(wise_adj=if_else(abs(lpks_num-wise_num)<=1, "Y", "N")) %>%
+                                     dplyr::mutate(hwsd_adj=if_else(abs(lpks_num-hwsd_num)<=1, "Y", "N")) %>%
+                                     dplyr::mutate(sg_adj=if_else(abs(lpks_num-sg_num)<=1, "Y", "N")) %>%
+                                     dplyr::mutate(isda_adj=if_else(abs(lpks_num-isda_num)<=1, "Y", "N")) %>% ungroup()
+
+#wise                        
+wise_adj_sum_rfv <- summary(rfv_class$wise_adj %>% factor())
+wise_adj_sum_rfv[[2]]/19542
+#hwsd                        
+hwsd_adj_sum_rfv <- summary(rfv_class$hwsd_adj %>% factor())
+hwsd_adj_sum_rfv[[2]]/19542
+#isda                        
+isda_adj_sum_rfv <- summary(rfv_class$isda_adj %>% factor())
+isda_adj_sum_rfv[[2]]/19542
+#sg                        
+sg_adj_sum_rfv <- summary(rfv_class$sg_adj %>% factor())
+sg_adj_sum_rfv[[2]]/19542
+
+lpks_truth_rfv_class <- factor(rfv_class$rfv_class, levels=unique(rfv_class$rfv_class))
+wise_rfv_class <- factor(rfv_class$rfv_class_wise, levels=unique(rfv_class$rfv_class))
+hwsd_rfv_class <- factor(rfv_class$rfv_class_hwsd, levels=unique(rfv_class$rfv_class))
+sg_rfv_class <- factor(rfv_class$rfv_class_sg, levels=unique(rfv_class$rfv_class))
+isda_rfv_class <- factor(rfv_class$rfv_class_isda, levels=unique(rfv_class$rfv_class))
+
+wise_cc_rfv_class <- table(wise_rfv_class,lpks_truth_rfv_class)
+hwsd_cc_rfv_class <- table(hwsd_rfv_class,lpks_truth_rfv_class)
+sg_cc_rfv_class <- table(sg_rfv_class,lpks_truth_rfv_class)
+isda_cc_rfv_class <- table(isda_rfv_class,lpks_truth_rfv_class)
+
+caret::confusionMatrix(wise_cc_rfv_class)
+caret::confusionMatrix(hwsd_cc_rfv_class)
+caret::confusionMatrix(sg_cc_rfv_class)
+caret::confusionMatrix(isda_cc_rfv_class)
+
+caret::confusionMatrix(wise_cc_rfv_class, mode = "prec_recall")
+caret::confusionMatrix(hwsd_cc_rfv_class, mode = "prec_recall")
+caret::confusionMatrix(sg_cc_rfv_class, mode = "prec_recall")
+caret::confusionMatrix(isda_cc_rfv_class, mode = "prec_recall")
+
+MMCE(lpks_truth_rfv_class,wise_rfv_class)
+ACC(lpks_truth_rfv_class,wise_rfv_class)
+BER(lpks_truth_rfv_class,wise_rfv_class)
+KAPPA(lpks_truth_rfv_class,wise_rfv_class)
+
+
+ACC(lpks_truth_rfv_class,wise_rfv_class)
+BER(lpks_truth_rfv_class,wise_rfv_class)
+
+ACC(lpks_truth_rfv_class,hwsd_rfv_class)
+BER(lpks_truth_rfv_class,hwsd_rfv_class)
+
+ACC(lpks_truth_rfv_class,sg_rfv_class)
+BER(lpks_truth_rfv_class,sg_rfv_class)
+
+ACC(lpks_truth_rfv_class,isda_rfv_class)
+BER(lpks_truth_rfv_class,isda_rfv_class)
+
+kstat(wise,lpks_truth)
+kstat(hwsd,lpks_truth)
+kstat(sg,lpks_truth)
+kstat(isda,lpks_truth)
+
+kstat(wise_rfv_class,lpks_truth_rfv_class)
+kstat(hwsd_rfv_class,lpks_truth_rfv_class)
+kstat(sg_rfv_class,lpks_truth_rfv_class)
+kstat(isda_rfv_class,lpks_truth_rfv_class)
+
+#Exact match
+sum(LPKS_Soil_Map_Data$wise_txt_m)/19542
+sum(LPKS_Soil_Map_Data$hwsd_txt_m)/19542
+sum(LPKS_Soil_Map_Data$sg_txt_m)/19542
+sum(LPKS_Soil_Map_Data$isda_txt_m)/19542
+
+sum(LPKS_Soil_Map_Data$wise_rfv_m)/19542
+sum(LPKS_Soil_Map_Data$hwsd_rfv_m)/19542
+sum(LPKS_Soil_Map_Data$sg_rfv_m)/19542
+sum(LPKS_Soil_Map_Data$isda_rfv_m)/19542
+```
+
+
+
+
+## ------------------------------------------------------------------------------------------------------------------------------
+
+# Evaluation of soil map accuracy in Ghana's cocoa growing regions
+
+# Subset LandPKS FarmGrow data
+```{r}
+LPKS_EPA_Soil_Map_Data <- LPKS_Soil_Map_Data %>% left_join(EPA_Soil_Data %>% dplyr::select(id, name) %>% dplyr::mutate(id=id %>% as.character()), by="id")
+LPKS_EPA_Soil_Map_Data <- LPKS_EPA_Soil_Map_Data %>% dplyr::filter(name %in% EPA_Soil_Data$name) %>% distinct()
+LPKS_EPA_Soil_Map_Data <- LPKS_EPA_Soil_Map_Data %>% dplyr::mutate(farm = str_sub(LPKS_EPA_Soil_Map_Data$name,1, -3))
+
+
+```
+
+
+#Accuracy of all FarmGrow sites (n=225) and depths (n=675)
+```{r}
+# calculate matches
+LPKS_EPA_Soil_Map_Data <- LPKS_EPA_Soil_Map_Data %>% rowwise() %>%
+      dplyr::mutate(wise_txt_m = match(texture, texture_wise)) %>%
+      dplyr::mutate(hwsd_txt_m = match(texture, texture_hwsd)) %>%
+      dplyr::mutate(sg_txt_m = match(texture, texture_sg)) %>%
+      dplyr::mutate(isda_txt_m = match(texture, texture_isda)) %>%
+      dplyr::mutate(wise_rfv_m = match(rfv_class, rfv_class_wise)) %>%
+      dplyr::mutate(hwsd_rfv_m = match(rfv_class, rfv_class_hwsd)) %>%
+      dplyr::mutate(sg_rfv_m = match(rfv_class, rfv_class_sg)) %>%
+      dplyr::mutate(isda_rfv_m = match(rfv_class, rfv_class_isda)) %>%
+      ungroup()
+
+#Frequency Tablesm                           
+txt_m_fg <- LPKS_EPA_Soil_Map_Data %>% dplyr::select(wise_txt_m,hwsd_txt_m,sg_txt_m,isda_txt_m)
+gather(txt_m_fg, "var", "value") %>%
+  count(var, value) %>%
+  dplyr::group_by(var) %>%             # now required with changes to dplyr::count()
+  dplyr::mutate(prop = prop.table(n))
+
+rfv_m_fg <- LPKS_EPA_Soil_Map_Data %>% dplyr::select(wise_rfv_m,hwsd_rfv_m,sg_rfv_m,isda_rfv_m)
+gather(rfv_m_fg, "var", "value") %>%
+  count(var, value) %>%
+  dplyr::group_by(var) %>%             # now required with changes to dplyr::count()
+  dplyr::mutate(prop = prop.table(n))
+
+texture_fg <- LPKS_EPA_Soil_Map_Data %>% dplyr::select(texture, texture_wise, texture_hwsd, texture_sg, texture_isda)
+texture_fg_freq <- gather(texture_fg, "var", "value") %>%
+  count(var, value) %>%
+  dplyr::group_by(var) %>%             # now required with changes to dplyr::count()
+  dplyr::mutate(prop = prop.table(n))
+
+texture_fg_freq$value <- factor(texture_fg_freq$value, levels=c("bedrock", "Clay", "Silty clay", "Sandy clay", "Silty clay loam", "Clay loam", "Sandy clay loam", "Silt loam", "Loam", "Sandy loam", "Loamy sand", "Sand"))
+p <- qplot(x = value, y = prop, fill = value, data = texture_fg_freq, ylim=c(0,0.65), geom = "col") + scale_x_discrete(drop=FALSE)
+
+pdf(here("analysis/figures/Ghana_soil_map_texture_freq_fg_sites.pdf"), width = 14, height = 7)
+p + facet_wrap(~var) + scale_fill_manual(values=c('black','#67001f','#b2182b','#d6604d','#f4a582','#fddbc7','#f7f7f7','#d1e5f0','#92c5de','#4393c3','#2166ac','#053061'),drop=FALSE) + geom_col(color = "black", size = .5)
+dev.off()
+
+
+rfv_class_fg <- LPKS_EPA_Soil_Map_Data %>% dplyr::select(rfv_class, rfv_class_wise, rfv_class_hwsd, rfv_class_sg, rfv_class_isda)
+rfv_class_fg_freq <- gather(rfv_class_fg, "var", "value") %>%
+  count(var, value) %>%
+  dplyr::group_by(var) %>%             # now required with changes to dplyr::count()
+  dplyr::mutate(prop = prop.table(n))
+
+rfv_class_fg_freq <- rfv_class_fg_freq %>% dplyr::mutate(prop = round(prop*100)) %>% dplyr::filter(value != "")
+rfv_class_fg_freq$value <- factor(rfv_class_fg_freq$value, levels=c("0-1%", "1-15%", "15-35%", "35-60%", ">60%", "bedrock"))
+p <- qplot(x = value, y = prop, fill = value, data = rfv_class_fg_freq, ylim=c(0,100), geom = "col") + scale_x_discrete(drop=FALSE)
+
+pdf(here("analysis/figures/Ghana_soil_map_rfv_freq_fg_sites.pdf"), width = 10, height = 7)
+p + facet_wrap(~var) + scale_fill_manual(values=rev(c('black', '#67001f','#b2182b','#d6604d','#f4a582','#fddbc7')),drop=FALSE) + geom_col(color = "black", size = .5)
+dev.off()
+
+texture_fg <- LPKS_EPA_Soil_Map_Data %>% dplyr::select(texture, texture_wise, texture_hwsd, texture_sg, texture_isda)
+texture_fg <- texture_fg %>% dplyr::filter(!texture=="") %>% ungroup()
+texture_fg <- texture_fg %>% transmute_if(is.character,tolower)
+
+#lpks
+texture_fg$lpks_num <- texture_fg %>% inner_join(Text_class_lookup %>% dplyr::select(text_class, lpks), by=c('texture'='text_class')) %>% dplyr::select(lpks) %>% pull()
+#wise
+texture_fg$wise_num <- texture_fg %>% inner_join(Text_class_lookup %>% dplyr::select(text_class, lpks), by=c('texture_wise'='text_class')) %>% dplyr::select(lpks) %>% pull()
+#hwsd
+texture_fg$hwsd_num <- texture_fg %>% inner_join(Text_class_lookup %>% dplyr::select(text_class, lpks), by=c('texture_hwsd'='text_class')) %>% dplyr::select(lpks) %>% pull()
+#sg
+texture_fg$sg_num <- texture_fg %>% inner_join(Text_class_lookup %>% dplyr::select(text_class, lpks), by=c('texture_sg'='text_class')) %>% dplyr::select(lpks) %>% pull()
+#isda
+texture_fg$isda_num <- texture_fg %>% inner_join(Text_class_lookup %>% dplyr::select(text_class, lpks), by=c('texture_isda'='text_class')) %>% dplyr::select(lpks) %>% pull()
+
+
+
+texture_fg <- texture_fg %>% rowwise() %>% dplyr::mutate(wise_adj=txt_adj(lpks_num,wise_num)) %>%
+                                     dplyr::mutate(hwsd_adj=txt_adj(lpks_num,hwsd_num)) %>%
+                                     dplyr::mutate(sg_adj=txt_adj(lpks_num,sg_num)) %>%
+                                     dplyr::mutate(isda_adj=txt_adj(lpks_num,isda_num)) %>% ungroup()
+#wise                        
+wise_fg_adj_sum <- summary(texture_fg$wise_adj %>% factor())
+wise_fg_adj_sum[[2]]/675
+#hwsd                        
+hwsd_fg_adj_sum <- summary(texture_fg$hwsd_adj %>% factor())
+hwsd_fg_adj_sum[[2]]/675
+#isda                        
+isda_fg_adj_sum <- summary(texture_fg$isda_adj %>% factor())
+isda_fg_adj_sum[[2]]/675
+#sg                        
+sg_fg_adj_sum <- summary(texture_fg$sg_adj %>% factor())
+sg_fg_adj_sum[[2]]/675
+
+lpks_truth_fg <- factor(texture_fg$texture, levels=unique(texture_fg$texture))
+wise_fg <- factor(texture_fg$texture_wise, levels=unique(texture_fg$texture))
+hwsd_fg <- factor(texture_fg$texture_hwsd, levels=unique(texture_fg$texture))
+sg_fg <- factor(texture_fg$texture_sg, levels=unique(texture_fg$texture))
+isda_fg <- factor(texture_fg$texture_isda, levels=unique(texture_fg$texture))
+
+wise_fg_cc <- table(wise_fg,lpks_truth_fg)
+hwsd_fg_cc <- table(hwsd_fg,lpks_truth_fg)
+sg_fg_cc <- table(sg_fg,lpks_truth_fg)
+isda_fg_cc <- table(isda_fg,lpks_truth_fg)
+caret::confusionMatrix(wise_fg_cc)
+caret::confusionMatrix(hwsd_fg_cc)
+caret::confusionMatrix(sg_fg_cc)
+caret::confusionMatrix(isda_fg_cc)
+
+#precision=user's accuracy, recall=producer's accuracy
+caret::confusionMatrix(wise_fg_cc, mode = "prec_recall")
+caret::confusionMatrix(hwsd_fg_cc, mode = "prec_recall")
+caret::confusionMatrix(sg_fg_cc, mode = "prec_recall")
+caret::confusionMatrix(isda_fg_cc, mode = "prec_recall")
+
+
+ACC(lpks_truth_fg,wise_fg)
+BER(lpks_truth_fg,wise_fg)
+FPR(lpks_truth_fg,wise_fg)
+ACC(lpks_truth_fg,hwsd_fg)
+BER(lpks_truth_fg,hwsd_fg)
+
+ACC(lpks_truth_fg,sg_fg)
+BER(lpks_truth_fg,sg_fg)
+
+ACC(lpks_truth_fg,isda_fg)
+BER(lpks_truth_fg,isda_fg)
+
+#load kstat function
+#install_github('environmentalinformatics-marburg/Rsenal')
+
+
+rfv_class_fg <- LPKS_EPA_Soil_Map_Data %>% dplyr::select(rfv_class, rfv_class_wise, rfv_class_hwsd, rfv_class_sg, rfv_class_isda)
+rfv_class_fg <- rfv_class_fg %>% dplyr::filter(!rfv_class=="") %>% ungroup()
+rfv_class_fg <- rfv_class_fg %>% transmute_if(is.character,tolower)
+
+#lpks
+rfv_class_fg$lpks_num <- rfv_class_fg %>% inner_join(rfv_lookup, by=c('rfv_class'='class')) %>% dplyr::select(class_num) %>% pull()
+#wise
+rfv_class_fg$wise_num <- rfv_class_fg %>% inner_join(rfv_lookup, by=c('rfv_class_wise'='class')) %>% dplyr::select(class_num) %>% pull()
+#hwsd
+rfv_class_fg$hwsd_num <- rfv_class_fg %>% inner_join(rfv_lookup, by=c('rfv_class_hwsd'='class')) %>% dplyr::select(class_num) %>% pull()
+#sg
+rfv_class_fg$sg_num <- rfv_class_fg %>% inner_join(rfv_lookup, by=c('rfv_class_sg'='class')) %>% dplyr::select(class_num) %>% pull()
+#isda
+rfv_class_fg$isda_num <- rfv_class_fg %>% inner_join(rfv_lookup, by=c('rfv_class_isda'='class')) %>% dplyr::select(class_num) %>% pull()
+
+rfv_class_fg <- rfv_class_fg %>% rowwise() %>% dplyr::mutate(wise_adj=if_else(abs(lpks_num-wise_num)<=1, "Y", "N")) %>%
+                                     dplyr::mutate(hwsd_adj=if_else(abs(lpks_num-hwsd_num)<=1, "Y", "N")) %>%
+                                     dplyr::mutate(sg_adj=if_else(abs(lpks_num-sg_num)<=1, "Y", "N")) %>%
+                                     dplyr::mutate(isda_adj=if_else(abs(lpks_num-isda_num)<=1, "Y", "N")) %>% ungroup()
+
+#wise                        
+wise_fg_adj_sum_rfv <- summary(rfv_class_fg$wise_adj %>% factor())
+wise_fg_adj_sum_rfv[[2]]/675
+#hwsd                        
+hwsd_fg_adj_sum_rfv <- summary(rfv_class_fg$hwsd_adj %>% factor())
+hwsd_fg_adj_sum_rfv[[2]]/675
+#isda                        
+isda_fg_adj_sum_rfv <- summary(rfv_class_fg$isda_adj %>% factor())
+isda_fg_adj_sum_rfv[[2]]/675
+#sg                        
+sg_fg_adj_sum_rfv <- summary(rfv_class_fg$sg_adj %>% factor())
+sg_fg_adj_sum_rfv[[2]]/675
+
+lpks_truth_rfv_class_fg <- factor(rfv_class_fg$rfv_class, levels=unique(rfv_class_fg$rfv_class))
+wise_rfv_class_fg <- factor(rfv_class_fg$rfv_class_wise, levels=unique(rfv_class_fg$rfv_class))
+hwsd_rfv_class_fg <- factor(rfv_class_fg$rfv_class_hwsd, levels=unique(rfv_class_fg$rfv_class))
+sg_rfv_class_fg <- factor(rfv_class_fg$rfv_class_sg, levels=unique(rfv_class_fg$rfv_class))
+isda_rfv_class_fg <- factor(rfv_class_fg$rfv_class_isda, levels=unique(rfv_class_fg$rfv_class))
+
+wise_fg_cc_rfv_class <- table(wise_rfv_class_fg,lpks_truth_rfv_class_fg)
+hwsd_fg_cc_rfv_class <- table(hwsd_rfv_class_fg,lpks_truth_rfv_class_fg)
+sg_fg_cc_rfv_class <- table(sg_rfv_class_fg,lpks_truth_rfv_class_fg)
+isda_fg_cc_rfv_class <- table(isda_rfv_class_fg,lpks_truth_rfv_class_fg)
+
+caret::confusionMatrix(wise_fg_cc_rfv_class)
+caret::confusionMatrix(hwsd_fg_cc_rfv_class)
+caret::confusionMatrix(sg_fg_cc_rfv_class)
+caret::confusionMatrix(isda_fg_cc_rfv_class)
+
+caret::confusionMatrix(wise_fg_cc_rfv_class, mode = "prec_recall")
+caret::confusionMatrix(hwsd_fg_cc_rfv_class, mode = "prec_recall")
+caret::confusionMatrix(sg_fg_cc_rfv_class, mode = "prec_recall")
+caret::confusionMatrix(isda_fg_cc_rfv_class, mode = "prec_recall")
+
+MMCE(lpks_truth_rfv_class_fg,wise_rfv_class_fg)
+ACC(lpks_truth_rfv_class_fg,wise_rfv_class_fg)
+BER(lpks_truth_rfv_class_fg,wise_rfv_class_fg)
+KAPPA(lpks_truth_rfv_class_fg,wise_rfv_class_fg)
+
+
+ACC(lpks_truth_rfv_class_fg,wise_rfv_class_fg)
+BER(lpks_truth_rfv_class_fg,wise_rfv_class_fg)
+
+ACC(lpks_truth_rfv_class_fg,hwsd_rfv_class_fg)
+BER(lpks_truth_rfv_class_fg,hwsd_rfv_class_fg)
+
+ACC(lpks_truth_rfv_class_fg,sg_rfv_class_fg)
+BER(lpks_truth_rfv_class_fg,sg_rfv_class_fg)
+
+ACC(lpks_truth_rfv_class_fg,isda_rfv_class_fg)
+BER(lpks_truth_rfv_class_fg,isda_rfv_class_fg)
+
+kstat(wise_fg,lpks_truth_fg)
+kstat(hwsd_fg,lpks_truth_fg)
+kstat(sg_fg,lpks_truth_fg)
+kstat(isda_fg,lpks_truth_fg)
+
+kstat(wise_rfv_class_fg,lpks_truth_rfv_class_fg)
+kstat(hwsd_rfv_class_fg,lpks_truth_rfv_class_fg)
+kstat(sg_rfv_class_fg,lpks_truth_rfv_class_fg)
+kstat(isda_rfv_class_fg,lpks_truth_rfv_class_fg)
+
+#Exact match
+sum(LPKS_EPA_Soil_Map_Data$wise_txt_m)/675
+sum(LPKS_EPA_Soil_Map_Data$hwsd_txt_m)/675
+sum(LPKS_EPA_Soil_Map_Data$sg_txt_m)/675
+sum(LPKS_EPA_Soil_Map_Data$isda_txt_m)/675
+
+sum(LPKS_EPA_Soil_Map_Data$wise_rfv_m)/675
+sum(LPKS_EPA_Soil_Map_Data$hwsd_rfv_m)/675
+sum(LPKS_EPA_Soil_Map_Data$sg_rfv_m)/675
+sum(LPKS_EPA_Soil_Map_Data$isda_rfv_m)/675
+```
+
+
+
+# Plot support map validation
+
+# create farm plot polygons 
+```{r}
+# Load in FarmGrow data to link plot area to 'farm_poly'
+FG_diag_detail <-  read.csv(here("data/private_data/Touton Ghana Diagnostic Details FarmGrow data.csv"), header=T)
+FG_plot_data <- read.csv(here("data/private_data/Touton Ghana Plot FarmGrow data.csv"), header=T)
+FG_Plot_Area <- FG_diag_detail %>% dplyr::select(Plot.Name, Plot.ID) %>% left_join(FG_plot_data %>% dplyr::select(Plot.ID, Plot.Area), by='Plot.ID')
+EPA_Soil_Data <- EPA_Soil_Data %>% dplyr::mutate(Farm = str_sub(EPA_Soil_Data$name,1, -3))
+EPA_LPKS_Farms <- unique(EPA_Soil_Data$Farm)
+FG_Plot_Area <- FG_Plot_Area %>% dplyr::filter(Plot.Name %in% EPA_LPKS_Farms) %>% distinct()
+
+# Calculate plot sampling area based on convex hull + buffer around 3 sampling sites
+EPA_Farm_Location <- EPA_Soil_Data %>% dplyr::select(name, Farm, latitude, longitude) %>% distinct()
+farm_poly_list <- list(list())
+for(i in 1:length(EPA_LPKS_Farms)){
+  farm <- EPA_Farm_Location %>% dplyr::filter(Farm==EPA_LPKS_Farms[i]) %>% dplyr::select(longitude, latitude) %>% as.matrix()
+  ch <- chull(farm)
+  coords <- farm[c(ch, ch[1]), ]  # closed polygon
+  farm_poly <- sp::SpatialPolygons(list(Polygons(list(Polygon(coords)), ID=1)))
+  farm_poly_df <- st_as_sf(SpatialPolygonsDataFrame(farm_poly, data=data.frame(ID=EPA_LPKS_Farms[i])))
+  st_crs(farm_poly_df) <- 4326 
+  farm_poly_df <- sf::st_transform(farm_poly_df, "+init=epsg:32630")
+  farm_buffer <- st_as_sf(gBuffer(as(farm_poly_df, Class="Spatial"), width=20, quadsegs=20))
+  farm_buffer <- farm_buffer %>% dplyr::mutate(area = st_area(farm_buffer), ID=EPA_LPKS_Farms[i])
+  farm_poly_list[[i]] <- farm_buffer
+  }
+
+farm_poly <- bind_rows(farm_poly_list)
+
+farm_poly <- farm_poly %>% left_join(FG_Plot_Area, by=c('ID'='Plot.Name'))
+farm_poly <- farm_poly %>% dplyr::mutate(samp_area_per = as.numeric(((area/10000)/Plot.Area)*100))
+write_sf(farm_poly, here("data/private_data/farm_poly.shp"))
+farm_poly <- read_sf(here("data/private_data/farm_poly.shp"))
+```
+
+
+
+#LandPKS plot averages
+```{r}
+#FarmGrow Plot Data
+LPKS_EPA_Soil_Map_Data <- LPKS_EPA_Soil_Map_Data %>% dplyr::mutate(farm = str_sub(LPKS_EPA_Soil_Map_Data$name,1, -3))
+
+LPKS_EPA_Plot_Data <- LPKS_EPA_Soil_Map_Data %>% dplyr::select(farm, bottom, sand_plot=sand, silt_plot=silt, clay_plot=clay, rfv_plot=rfv, bedrock_plot=bedrock) %>% dplyr::group_by(farm, bottom)  %>% summarise(across(everything(), ~ mean(.x, na.rm = TRUE))) %>% ungroup()
+LPKS_EPA_Plot_Data <- LPKS_EPA_Plot_Data %>% rowwise() %>% dplyr::mutate(texture_plot = gettt(sand=sand_plot, silt=silt_plot, clay=clay_plot)) %>% dplyr::mutate(rfv_class_plot = getCF_class(rfv_plot)) %>% ungroup() %>% as.data.frame()
+
+```
+
+# SoilGrids Plot averages (creates 10m grid-based point sampling)
+```{r}
+#SG2 Plot averages
+SG2_soil_plot <- list(list())
+for(i in 1:nrow(farm_poly)){
+  r <- raster(farm_poly[i,], res = 10)
+  r_poly <- rasterize(farm_poly[i,], r)
+  p <- rasterToPoints(r_poly)
+  p<- p %>% as.data.frame()
+  points <- st_as_sf(p, coords = c("x", "y"), crs = "+init=epsg:32630")
+  sg_siltValue=raster::extract(sg2_silt_brick, points) %>% colMeans() *0.1
+  sg_clayValue=extract(sg2_clay_brick, points) %>% colMeans() *0.1
+  sg_sandValue=extract(sg2_sand_brick, points) %>% colMeans() *0.1
+  sg_rfvValue=extract(sg2_rfv_brick, points) %>% colMeans() *0.1
+  sg <- bind_cols(sg_sandValue, sg_siltValue, sg_clayValue, sg_rfvValue) %>% set_names("sand", "silt", "clay", "rfv")
+  sg <- sg  %>% rowwise() %>% dplyr::mutate(sand_c = sand*(100/(sand+silt+clay)), silt_c = silt*(100/(sand+silt+clay)), clay_c = clay*(100/(sand+silt+clay))) %>% ungroup() %>% dplyr::select(sand=sand_c, silt=silt_c, clay=clay_c, rfv)  %>% as.data.frame()
+  sg <- sg %>% dplyr::mutate(top=c(0,5,15,30), bottom=c(5,15,30,60), id=c(1,1,1,1)) %>% as.data.frame()
+  sg$id <- farm_poly[i,]$ID
+  depths(sg) <- id ~ top + bottom
+
+  
+  LPKS_sg_fg.slab <- aqp::slab(sg, fm = id ~ sand + silt + clay + rfv, slab.structure=c(0,10,20,50), slab.fun=mean_na)
+  LPKS_sg_fg.slab <- LPKS_sg_fg.slab %>% dplyr::select(-c(contributing_fraction)) %>% spread(variable, value)
+  LPKS_sg_fg.slab[ is.na(LPKS_sg_fg.slab) ] <- NA
+
+  #bedrock
+  sg.bedrock <- raster::extract(sg1_bedrock[[1]],  points) %>% mean()
+
+  sg.data <- LPKS_sg_fg.slab  %>% dplyr::mutate(bedrock=sg.bedrock)
+  # correct for particle size class predictions so that sand+silt+clay=100
+  sg.data <- sg.data  %>% rowwise() %>% dplyr::mutate(sand_c = sand*(100/(sand+silt+clay)), silt_c = silt*(100/(sand+silt+clay)), clay_c = clay*(100/(sand+silt+clay))) %>% ungroup() 
+  sg.data <- sg.data  %>%  dplyr::select(id, top, bottom, sand=sand_c, silt=silt_c, clay=clay_c, rfv, bedrock)
+  sg.data <- sg.data %>% rowwise() %>% dplyr::mutate(texture = gettt(sand=sand, silt=silt, clay=clay)) %>% dplyr::mutate(rfv_class = getCF_class(rfv)) %>% ungroup() %>% as.data.frame()
+  sg.data <-sg.data %>% rowwise() %>% dplyr::mutate(bedrock = case_when(bedrock>120 ~ 120)) %>% ungroup() %>% as.data.frame()
+  sg.data <- sg.data %>% rowwise() %>% dplyr::mutate(texture = case_when(bedrock<=top ~ "bedrock",
+  TRUE ~ texture), rfv_class = case_when(bedrock<=top ~ "bedrock", TRUE ~ rfv_class)) %>% ungroup()
+  sg.data <- sg.data %>% rename(sand_sg_plot=sand, silt_sg_plot=silt, clay_sg_plot=clay, rfv_sg_plot=rfv, bedrock_sg_plot=bedrock, texture_sg_plot=texture, rfv_class_sg_plot=rfv_class)
+  SG2_soil_plot[[i]] <- sg.data
+}
+SG2_soil_plot_data <- bind_rows(SG2_soil_plot)
+SG2_soil_plot_data$bottom <- as.integer(SG2_soil_plot_data$bottom)
+
+
+#Number of pixels per polygon
+SG2_soil_plot_PixNum <- list(list())
+for(i in 1:nrow(farm_poly)){
+  SG2_soil_plot_PixNum[i] = raster::extract(sg2_silt_brick[[1]], farm_poly[i,]) %>% unlist() %>% length()
+}
+
+
+
+
+
+```
+
+
+
+
+#ISDA plot averages
+```{r}
+isda_silt_proj <- projectRaster(isda_silt, crs='+proj=utm +zone=30 +datum=WGS84 +units=m +no_defs', res=30)
+#ISDA Plot averages
+ISDA_soil_plot <- list(list())
+for(i in 1:length(farm_poly)){
+  r <- raster(farm_poly[i,], res = 10)
+  r_poly <- rasterize(farm_poly[i,], r)
+  p <- rasterToPoints(r_poly)
+  p<- p %>% as.data.frame()
+  points <- st_as_sf(p, coords = c("x", "y"), crs = "+init=epsg:32630")
+  isda_siltValue=raster::extract(isda_silt[[1:2]], points) %>% colMeans()
+  isda_clayValue=extract(isda_clay[[1:2]], points) %>% colMeans()
+  isda_sandValue=extract(isda_sand[[1:2]], points) %>% colMeans()
+  isda_rfvValue=extract(isda_rfv[[1:2]], points) %>% colMeans()
+  isda <- bind_cols(isda_sandValue, isda_siltValue, isda_clayValue, isda_rfvValue) %>% set_names("sand", "silt", "clay", "rfv")
+  isda <- isda  %>% rowwise() %>% dplyr::mutate(sand_c = sand*(100/(sand+silt+clay)), silt_c = silt*(100/(sand+silt+clay)), clay_c = clay*(100/(sand+silt+clay))) %>% ungroup() %>% dplyr::select(sand=sand_c, silt=silt_c, clay=clay_c, rfv)  %>% as.data.frame()
+  isda <- isda %>% dplyr::mutate(top=c(0,20), bottom=c(20,50), id=c(1,1)) %>% as.data.frame()
+  isda$id <- farm_poly[i,]$ID
+  depths(isda) <- id ~ top + bottom
+
+  LPKS_isda_fg.slab <- aqp::slab(isda, fm = id ~ sand + silt + clay + rfv, slab.structure=c(0,10,20,50), slab.fun=mean_na)
+  LPKS_isda_fg.slab <- LPKS_isda_fg.slab %>% dplyr::select(-c(contributing_fraction)) %>% spread(variable, value)
+  LPKS_isda_fg.slab[ is.na(LPKS_isda_fg.slab) ] <- NA
+
+  #bedrock
+  isda.bedrock <- raster::extract(isda_bedrock[[1]],  points) %>% mean()
+
+  isda.data <- LPKS_isda_fg.slab  %>% dplyr::mutate(bedrock=isda.bedrock)
+  # correct for particle size class predictions so that sand+silt+clay=100
+  isda.data <- isda.data  %>% rowwise() %>% dplyr::mutate(sand_c = sand*(100/(sand+silt+clay)), silt_c = silt*(100/(sand+silt+clay)), clay_c = clay*(100/(sand+silt+clay))) %>% ungroup() 
+  isda.data <- isda.data  %>%  dplyr::select(id, top, bottom, sand=sand_c, silt=silt_c, clay=clay_c, rfv, bedrock)
+  isda.data <- isda.data %>% rowwise() %>% dplyr::mutate(texture = gettt(sand=sand, silt=silt, clay=clay)) %>% dplyr::mutate(rfv_class = getCF_class(rfv)) %>% ungroup() %>% as.data.frame()
+  
+  isda.data <-isda.data %>% rowwise() %>% dplyr::mutate(bedrock = case_when(bedrock>120 ~ 120)) %>% ungroup() %>% as.data.frame()
+  isda.data <- isda.data %>% rename(sand_isda_plot=sand, silt_isda_plot=silt, clay_isda_plot=clay, rfv_isda_plot=rfv, bedrock_isda_plot=bedrock, texture_isda_plot=texture, rfv_class_isda_plot=rfv_class)
+  ISDA_soil_plot[[i]] <- isda.data
+}
+ISDA_soil_plot_data <- bind_rows(ISDA_soil_plot)
+ISDA_soil_plot_data$bottom <- as.integer(ISDA_soil_plot_data$bottom)
+
+#Number of pixels per polygon
+ISDA_soil_plot_PixNum <- list(list())
+for(i in 1:length(farm_poly)){
+  ISDA_soil_plot_PixNum[i] = raster::extract(isda_clay[[1]], farm_poly[i,]) %>% unlist() %>% length()
+}
+ISDA_soil_plot_PixNum <- ISDA_soil_plot_PixNum %>% unlist()
+
+
+
+
+```
+
+
+# HWSD/WISE Plot averages: All plots  fall within a single mapunit
+```{r}
+#HWSD plot data
+LPKS_HWSD_Plot_Data <- LPKS_EPA_Soil_Map_Data %>% dplyr::select(farm, bottom, sand_hwsd_plot=sand_hwsd, silt_hwsd_plot=silt_hwsd, clay_hwsd_plot=clay_hwsd, rfv_hwsd_plot=rfv_hwsd, bedrock_hwsd_plot=bedrock_hwsd) %>% dplyr::group_by(farm, bottom)  %>% summarise(across(everything(), ~ mean(.x, na.rm = TRUE))) %>% ungroup()
+LPKS_HWSD_Plot_Data <- LPKS_HWSD_Plot_Data %>% rowwise() %>% dplyr::mutate(texture_hwsd_plot = gettt(sand=sand_hwsd_plot, silt=silt_hwsd_plot, clay=clay_hwsd_plot)) %>% dplyr::mutate(rfv_class_hwsd_plot = getCF_class(rfv_hwsd_plot)) %>% ungroup() %>% as.data.frame()
+
+
+#WISE plot data
+LPKS_WISE_Plot_Data <- LPKS_EPA_Soil_Map_Data %>% dplyr::select(farm, bottom, sand_wise_plot=sand_wise, silt_wise_plot=silt_wise, clay_wise_plot=clay_wise, rfv_wise_plot=rfv_wise, bedrock_wise_plot=bedrock_wise) %>% dplyr::group_by(farm, bottom)  %>% summarise(across(everything(), ~ mean(.x, na.rm = TRUE))) %>% ungroup()
+LPKS_WISE_Plot_Data <- LPKS_WISE_Plot_Data %>% rowwise() %>% dplyr::mutate(texture_wise_plot = gettt(sand=sand_wise_plot, silt=silt_wise_plot, clay=clay_wise_plot)) %>% dplyr::mutate(rfv_class_wise_plot = getCF_class(rfv_wise_plot)) %>% ungroup() %>% as.data.frame()
+```
+
+#combine plot averages and calculate accuracy measures
+```{r}
+LPKS_Soil_Map_Plot_Data <- LPKS_EPA_Plot_Data %>% inner_join(SG2_soil_plot_data, by=c("farm"="id", "bottom"="bottom"))
+LPKS_Soil_Map_Plot_Data <- LPKS_Soil_Map_Plot_Data %>% inner_join(ISDA_soil_plot_data, by=c("farm"="id", "bottom"="bottom"))
+LPKS_Soil_Map_Plot_Data <- LPKS_Soil_Map_Plot_Data %>% inner_join(LPKS_HWSD_Plot_Data, by=c("farm"="farm", "bottom"="bottom"))
+LPKS_Soil_Map_Plot_Data <- LPKS_Soil_Map_Plot_Data %>% inner_join(LPKS_WISE_Plot_Data, by=c("farm"="farm", "bottom"="bottom"))
+
+# calculate matches
+LPKS_Soil_Map_Plot_Data <- LPKS_Soil_Map_Plot_Data %>% rowwise() %>%
+      dplyr::mutate(wise_plot_txt_m = match(texture_plot, texture_wise_plot)) %>%
+      dplyr::mutate(hwsd_plot_txt_m = match(texture_plot, texture_hwsd_plot)) %>%
+      dplyr::mutate(sg_plot_txt_m = match(texture_plot, texture_sg_plot)) %>%
+      dplyr::mutate(isda_plot_txt_m = match(texture_plot, texture_isda_plot)) %>%
+      dplyr::mutate(wise_plot_rfv_m = match(rfv_class_plot, rfv_class_wise_plot)) %>%
+      dplyr::mutate(hwsd_plot_rfv_m = match(rfv_class_plot, rfv_class_hwsd_plot)) %>%
+      dplyr::mutate(sg_plot_rfv_m = match(rfv_class_plot, rfv_class_sg_plot)) %>%
+      dplyr::mutate(isda_plot_rfv_m = match(rfv_class_plot, rfv_class_isda_plot)) %>%
+      ungroup()
+
+#Frequency Tablesm                           
+txt_m_plot <- LPKS_Soil_Map_Plot_Data %>% dplyr::select(wise_plot_txt_m,hwsd_plot_txt_m,sg_plot_txt_m,isda_plot_txt_m)
+txt_m_plot_freq <- gather(txt_m_plot, "var", "value") %>%
+  count(var, value) %>%
+  dplyr::group_by(var) %>%             # now required with changes to dplyr::count()
+  dplyr::mutate(prop = prop.table(n))
+
+rfv_m_plot <- LPKS_Soil_Map_Plot_Data %>% dplyr::select(wise_plot_rfv_m,hwsd_plot_rfv_m,sg_plot_rfv_m,isda_plot_rfv_m)
+rfv_m_plot_freq <- gather(rfv_m_plot, "var", "value") %>%
+  count(var, value) %>%
+  dplyr::group_by(var) %>%             # now required with changes to dplyr::count()
+  dplyr::mutate(prop = prop.table(n))
+
+texture_plot <- LPKS_Soil_Map_Plot_Data %>% dplyr::select(texture_plot, texture_wise_plot, texture_hwsd_plot, texture_sg_plot, texture_isda_plot)
+texture__plot_freq <- gather(texture_plot, "var", "value") %>%
+  count(var, value) %>%
+  dplyr::group_by(var) %>%             # now required with changes to dplyr::count()
+  dplyr::mutate(prop = prop.table(n))
+
+rfv_class_plot <- LPKS_Soil_Map_Plot_Data %>% dplyr::select(rfv_class_plot, rfv_class_wise_plot, rfv_class_hwsd_plot, rfv_class_sg_plot, rfv_class_isda_plot)
+rfv_class_plot_freq <- gather(rfv_class_plot, "var", "value") %>%
+  count(var, value) %>%
+  dplyr::group_by(var) %>%             # now required with changes to dplyr::count()
+  dplyr::mutate(prop = prop.table(n))
+
+
+texture_plot <- LPKS_Soil_Map_Plot_Data %>% dplyr::select(texture_plot, texture_wise_plot, texture_hwsd_plot, texture_sg_plot, texture_isda_plot)
+texture_plot <- texture_plot %>% dplyr::filter(!texture_plot=="") %>% ungroup()
+texture_plot <- texture_plot %>% transmute_if(is.character,tolower)
+#lpks
+texture_plot$lpks_num <- texture_plot %>% inner_join(Text_class_lookup %>% dplyr::select(text_class, lpks), by=c('texture_plot'='text_class')) %>% dplyr::select(lpks) %>% pull()
+#wise
+texture_plot$wise_num <- texture_plot %>% inner_join(Text_class_lookup %>% dplyr::select(text_class, lpks), by=c('texture_wise_plot'='text_class')) %>% dplyr::select(lpks) %>% pull()
+#hwsd
+texture_plot$hwsd_num <- texture_plot %>% inner_join(Text_class_lookup %>% dplyr::select(text_class, lpks), by=c('texture_hwsd_plot'='text_class')) %>% dplyr::select(lpks) %>% pull()
+#sg
+texture_plot$sg_num <- texture_plot %>% inner_join(Text_class_lookup %>% dplyr::select(text_class, lpks), by=c('texture_sg_plot'='text_class')) %>% dplyr::select(lpks) %>% pull()
+#isda
+texture_plot$isda_num <- texture_plot %>% inner_join(Text_class_lookup %>% dplyr::select(text_class, lpks), by=c('texture_isda_plot'='text_class')) %>% dplyr::select(lpks) %>% pull()
+
+
+
+texture_plot <- texture_plot %>% rowwise() %>% dplyr::mutate(wise_plot_adj=txt_adj(lpks_num,wise_num)) %>%
+                                     dplyr::mutate(hwsd_plot_adj=txt_adj(lpks_num,hwsd_num)) %>%
+                                     dplyr::mutate(sg_plot_adj=txt_adj(lpks_num,sg_num)) %>%
+                                     dplyr::mutate(isda_plot_adj=txt_adj(lpks_num,isda_num)) %>% ungroup()
+#wise                        
+wise_plot_adj_sum <- summary(texture_plot$wise_plot_adj %>% factor())
+wise_plot_adj_sum[[2]]/225
+#hwsd                        
+hwsd_plot_adj_sum <- summary(texture_plot$hwsd_plot_adj %>% factor())
+hwsd_plot_adj_sum[[2]]/225
+#isda                        
+isda_plot_adj_sum <- summary(texture_plot$isda_plot_adj %>% factor())
+isda_plot_adj_sum[[2]]/225
+#sg                        
+sg_plot_adj_sum <- summary(texture_plot$sg_plot_adj %>% factor())
+sg_plot_adj_sum[[2]]/225
+
+lpks_truth_plot <- factor(texture_plot$texture_plot, levels=c(unique(texture_plot$texture_plot), "sandy clay"))
+wise_plot <- factor(texture_plot$texture_wise_plot, levels=c(unique(texture_plot$texture_plot), "sandy clay"))
+hwsd_plot <- factor(texture_plot$texture_hwsd_plot, levels=c(unique(texture_plot$texture_plot), "sandy clay"))
+sg_plot <- factor(texture_plot$texture_sg_plot, levels=c(unique(texture_plot$texture_plot), "sandy clay"))
+isda_plot <- factor(texture_plot$texture_isda_plot, levels=c(unique(texture_plot$texture_plot), "sandy clay"))
+
+wise_plot_cc <- table(wise_plot,lpks_truth_plot)
+hwsd_plot_cc <- table(hwsd_plot,lpks_truth_plot)
+sg_plot_cc <- table(sg_plot,lpks_truth_plot)
+isda_plot_cc <- table(isda_plot,lpks_truth_plot)
+caret::confusionMatrix(wise_plot_cc)
+caret::confusionMatrix(hwsd_plot_cc)
+caret::confusionMatrix(sg_plot_cc)
+caret::confusionMatrix(isda_plot_cc)
+
+#precision=user's accuracy, recall=producer's accuracy
+caret::confusionMatrix(wise_plot_cc, mode = "prec_recall")
+caret::confusionMatrix(hwsd_plot_cc, mode = "prec_recall")
+caret::confusionMatrix(sg_plot_cc, mode = "prec_recall")
+caret::confusionMatrix(isda_plot_cc, mode = "prec_recall")
+
+BER_na <- function (truth, response) {
+    if (anyNA(response)) 
+        return(NA_real_)
+    mean(diag(1 - (table(truth, response)/table(truth, truth))), na.rm=T)
+}
+
+ACC(lpks_truth_plot,wise_plot)
+BER_na(lpks_truth_plot,wise_plot)
+
+ACC(lpks_truth_plot,hwsd_plot)
+BER_na(lpks_truth_plot,hwsd_plot)
+
+ACC(lpks_truth_plot,sg_plot)
+BER_na(lpks_truth_plot,sg_plot)
+
+ACC(lpks_truth_plot,isda_plot)
+BER_na(lpks_truth_plot,isda_plot)
+
+#load kstat function
+#install_github('environmentalinformatics-marburg/Rsenal')
+
+
+rfv_class_plot <- LPKS_Soil_Map_Plot_Data %>% dplyr::select(rfv_class_plot, rfv_class_wise_plot, rfv_class_hwsd_plot, rfv_class_sg_plot, rfv_class_isda_plot)
+rfv_class_plot <- rfv_class_plot %>% dplyr::filter(!rfv_class_plot=="") %>% ungroup()
+rfv_class_plot <- rfv_class_plot %>% transmute_if(is.character,tolower)
+
+#lpks
+rfv_class_plot$lpks_num <- rfv_class_plot %>% inner_join(rfv_lookup, by=c('rfv_class_plot'='class')) %>% dplyr::select(class_num) %>% pull()
+#wise
+rfv_class_plot$wise_num <- rfv_class_plot %>% inner_join(rfv_lookup, by=c('rfv_class_wise_plot'='class')) %>% dplyr::select(class_num) %>% pull()
+#hwsd
+rfv_class_plot$hwsd_num <- rfv_class_plot %>% inner_join(rfv_lookup, by=c('rfv_class_hwsd_plot'='class')) %>% dplyr::select(class_num) %>% pull()
+#sg
+rfv_class_plot$sg_num <- rfv_class_plot %>% inner_join(rfv_lookup, by=c('rfv_class_sg_plot'='class')) %>% dplyr::select(class_num) %>% pull()
+#isda
+rfv_class_plot$isda_num <- rfv_class_plot %>% inner_join(rfv_lookup, by=c('rfv_class_isda_plot'='class')) %>% dplyr::select(class_num) %>% pull()
+
+rfv_class_plot <- rfv_class_plot %>% rowwise() %>% dplyr::mutate(wise_plot_adj=if_else(abs(lpks_num-wise_num)<=1, "Y", "N")) %>%
+                                     dplyr::mutate(hwsd_plot_adj=if_else(abs(lpks_num-hwsd_num)<=1, "Y", "N")) %>%
+                                     dplyr::mutate(sg_plot_adj=if_else(abs(lpks_num-sg_num)<=1, "Y", "N")) %>%
+                                     dplyr::mutate(isda_plot_adj=if_else(abs(lpks_num-isda_num)<=1, "Y", "N")) %>% ungroup()
+
+#wise                        
+wise_plot_adj_sum_rfv <- summary(rfv_class_plot$wise_plot_adj %>% factor())
+wise_plot_adj_sum_rfv[[2]]/225
+#hwsd                        
+hwsd_plot_adj_sum_rfv <- summary(rfv_class_plot$hwsd_plot_adj %>% factor())
+hwsd_plot_adj_sum_rfv[[2]]/225
+#isda                        
+isda_plot_adj_sum_rfv <- summary(rfv_class_plot$isda_plot_adj %>% factor())
+isda_plot_adj_sum_rfv[[2]]/225
+#sg                        
+sg_plot_adj_sum_rfv <- summary(rfv_class_plot$sg_plot_adj %>% factor())
+sg_plot_adj_sum_rfv[[2]]/225
+
+lpks_truth_rfv_class_plot <- factor(rfv_class_plot$rfv_class_plot, levels=unique(rfv_class_plot$rfv_class_plot))
+wise_rfv_class_plot <- factor(rfv_class_plot$rfv_class_wise_plot, levels=unique(rfv_class_plot$rfv_class_plot))
+hwsd_rfv_class_plot <- factor(rfv_class_plot$rfv_class_hwsd_plot, levels=unique(rfv_class_plot$rfv_class_plot))
+sg_rfv_class_plot <- factor(rfv_class_plot$rfv_class_sg_plot, levels=unique(rfv_class_plot$rfv_class_plot))
+isda_rfv_class_plot <- factor(rfv_class_plot$rfv_class_isda_plot, levels=unique(rfv_class_plot$rfv_class_plot))
+
+wise_cc_rfv_class_plot <- table(wise_rfv_class_plot,lpks_truth_rfv_class_plot)
+hwsd_cc_rfv_class_plot <- table(hwsd_rfv_class_plot,lpks_truth_rfv_class_plot)
+sg_cc_rfv_class_plot <- table(sg_rfv_class_plot,lpks_truth_rfv_class_plot)
+isda_cc_rfv_class_plot <- table(isda_rfv_class_plot,lpks_truth_rfv_class_plot)
+
+caret::confusionMatrix(wise_cc_rfv_class_plot)
+caret::confusionMatrix(hwsd_cc_rfv_class_plot)
+caret::confusionMatrix(sg_cc_rfv_class_plot)
+caret::confusionMatrix(isda_cc_rfv_class_plot)
+
+caret::confusionMatrix(wise_cc_rfv_class_plot, mode = "prec_recall")
+caret::confusionMatrix(hwsd_cc_rfv_class_plot, mode = "prec_recall")
+caret::confusionMatrix(sg_cc_rfv_class_plot, mode = "prec_recall")
+caret::confusionMatrix(isda_cc_rfv_class_plot, mode = "prec_recall")
+
+MMCE(lpks_truth_rfv_class_plot,wise_rfv_class_plot)
+ACC(lpks_truth_rfv_class_plot,wise_rfv_class_plot)
+BER(lpks_truth_rfv_class_plot,wise_rfv_class_plot)
+KAPPA(lpks_truth_rfv_class_plot,wise_rfv_class_plot)
+
+
+ACC(lpks_truth_rfv_class_plot,wise_rfv_class_plot)
+BER(lpks_truth_rfv_class_plot,wise_rfv_class_plot)
+
+ACC(lpks_truth_rfv_class_plot,hwsd_rfv_class_plot)
+BER(lpks_truth_rfv_class_plot,hwsd_rfv_class_plot)
+
+ACC(lpks_truth_rfv_class_plot,sg_rfv_class_plot)
+BER(lpks_truth_rfv_class_plot,sg_rfv_class_plot)
+
+ACC(lpks_truth_rfv_class_plot,isda_rfv_class_plot)
+BER(lpks_truth_rfv_class_plot,isda_rfv_class_plot)
+
+kstat(wise_plot,lpks_truth_plot)
+kstat(hwsd_plot,lpks_truth_plot)
+kstat(sg_plot,lpks_truth_plot)
+kstat(isda_plot,lpks_truth_plot)
+
+kstat(wise_rfv_class_plot,lpks_truth_rfv_class_plot)
+kstat(hwsd_rfv_class_plot,lpks_truth_rfv_class_plot)
+kstat(sg_rfv_class_plot,lpks_truth_rfv_class_plot)
+kstat(isda_rfv_class_plot,lpks_truth_rfv_class_plot)
+
+#Exact match
+sum(LPKS_Soil_Map_Plot_Data$wise_plot_txt_m)/225
+sum(LPKS_Soil_Map_Plot_Data$hwsd_plot_txt_m)/225
+sum(LPKS_Soil_Map_Plot_Data$sg_plot_txt_m)/225
+sum(LPKS_Soil_Map_Plot_Data$isda_plot_txt_m)/225
+
+sum(LPKS_Soil_Map_Plot_Data$wise_plot_rfv_m)/225
+sum(LPKS_Soil_Map_Plot_Data$hwsd_plot_rfv_m)/225
+sum(LPKS_Soil_Map_Plot_Data$sg_plot_rfv_m)/225
+sum(LPKS_Soil_Map_Plot_Data$isda_plot_rfv_m)/225
+```
+
+
+# -----------------------------------------------------------------------------------------------------------------------------
+# Modified GAEZ Comparison Framework
+```{r}
+S_Class <- function(rating){
+  if(rating >= 95){
+    SC <- 'S0'
+  } else if(rating < 95 & rating >= 85){
+    SC <- 'S1'
+  } else if(rating < 85 & rating >= 60){
+    SC <- 'S2'
+  } else if(rating < 60 & rating >= 40){
+    SC <- 'S3'
+  } else if(rating < 40 & rating >= 10){
+    SC <- 'S4'
+  } else if(rating < 10){
+    SC <- 'N'
+  } 
+  return(SC)
+}
+
+library(ggplot2)
+library(multcompView)
+# I need to group the treatments that are not different each other together.
+generate_label_df <- function(TUKEY, variable){
+ 
+     # Extract labels and factor levels from Tukey post-hoc 
+     Tukey.levels <- TUKEY[[variable]][,4]
+     Tukey.labels <- data.frame(multcompLetters(Tukey.levels)['Letters'])
+     
+     #I need to put the labels in the same order as in the boxplot :
+     Tukey.labels$treatment=rownames(Tukey.labels)
+     order = order(Tukey.labels$treatment)
+     Tukey.labels=Tukey.labels[order(Tukey.labels$treatment) , ]
+     Tukey.labels$order = order
+     return(Tukey.labels)
+     }
+# A panel of colors to draw each group with the same color :
+library(colorspace)
+
+```
+## Modified GAEZ analaysis on entire dataset
+```{r}
+reticulate::source_python(here("code/GAEZ_Func_Profile_Comp.py"))
+
+GH_profile_list <- unique(LPKS_Soil_Map_Data$id)
+
+GH_AEZ_Map_Compare_list <- list()
+n <- length(GH_profile_list)
+pb <- txtProgressBar(min = 1, max = n, style=3)
+
+stime <- system.time({ 
+GH_AEZ_Map_Compare_list <- foreach(i=1:length(GH_profile_list), .packages = c("sf", "purrr", "stringr", "dplyr", "tidyr", "reticulate")) %do% { 
+  setTxtProgressBar(pb, i)
+  tryCatch({
+    lpks <- LPKS_Soil_Map_Data %>% dplyr::filter(id==GH_profile_list[i]) %>% dplyr::select(id, bedrock_depth = bedrock, bottom, texture, rfv) %>% dplyr::mutate(bedrock_depth = bedrock_depth %>% as.numeric() %>% tidyr::replace_na(NaN)) 
+    sg <- LPKS_Soil_Map_Data %>% dplyr::filter(id==GH_profile_list[i]) %>% dplyr::select(id, bedrock_depth=bedrock_sg, bottom, texture=texture_sg, rfv=rfv_sg) %>% dplyr::mutate(bedrock_depth = bedrock_depth %>% as.numeric() %>% tidyr::replace_na(NaN)) 
+    hwsd <- LPKS_Soil_Map_Data %>% dplyr::filter(id==GH_profile_list[i]) %>% dplyr::select(id, bedrock_depth=bedrock_hwsd, bottom, texture=texture_hwsd, rfv=rfv_hwsd) %>% dplyr::mutate(bedrock_depth = bedrock_depth %>% as.numeric() %>% tidyr::replace_na(NaN)) 
+    wise <- LPKS_Soil_Map_Data %>% dplyr::filter(id==GH_profile_list[i]) %>% dplyr::select(id, bedrock_depth=bedrock_wise, bottom, texture=texture_wise, rfv=rfv_wise) %>% dplyr::mutate(bedrock_depth = bedrock_depth %>% as.numeric() %>% tidyr::replace_na(NaN)) 
+    isda <- LPKS_Soil_Map_Data %>% dplyr::filter(id==GH_profile_list[i]) %>% dplyr::select(id, bedrock_depth=bedrock_isda, bottom, texture=texture_isda, rfv=rfv_isda) %>% dplyr::mutate(bedrock_depth = bedrock_depth %>% as.numeric() %>% tidyr::replace_na(NaN)) 
+    reticulate::source_python("C:/R_Drive/Data_Files/LPKS_Data/R_Projects/SoilID/code/GAEZ_Func_Profile_Comp.py")
+    Prof1 <- func_prof_comp_GAEZ_SQI(data=lpks, CROP_ID='4', inputLevel='L', depthWt_type=1) %>% dplyr::mutate(data_source=c("LPKS"))
+    Prof2 <- func_prof_comp_GAEZ_SQI(data=sg, CROP_ID='4', inputLevel='L', depthWt_type=1) %>% dplyr::mutate(data_source="SG")
+    Prof3 <- func_prof_comp_GAEZ_SQI(data=hwsd, CROP_ID='4', inputLevel='L', depthWt_type=1) %>% dplyr::mutate(data_source="HWSD")
+    Prof4 <- func_prof_comp_GAEZ_SQI(data=wise, CROP_ID='4', inputLevel='L', depthWt_type=1) %>% dplyr::mutate(data_source="WISE")
+    Prof5 <- func_prof_comp_GAEZ_SQI(data=isda, CROP_ID='4', inputLevel='L', depthWt_type=1) %>% dplyr::mutate(data_source="ISDA")
+    prof_all <-rbind(Prof1,Prof2,Prof3,Prof4,Prof5)
+    GH_AEZ_Map_Compare_list[[i]] <- prof_all
+  }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+close(pb)
+})[3]
+stime
+
+GH_AEZ_Map_Compare.df <- bind_rows(GH_AEZ_Map_Compare_list)
+
+GH_AEZ_Map_Compare.df <- GH_AEZ_Map_Compare.df %>% dplyr::mutate(SQ1=if_else(SQ1>100, 100, SQ1)) %>% dplyr::mutate(SQ3=if_else(SQ3>100, 100, SQ3)) %>% dplyr::mutate(SQ7=if_else(SQ7>100, 100, SQ7)) %>% rowwise() %>% dplyr::mutate(SR=SQ1*(SQ3/100)*(SQ7/100)) %>% ungroup()
+GH_AEZ_Map_Compare.df <- GH_AEZ_Map_Compare.df %>% rowwise() %>% dplyr::mutate(SC = S_Class(SR)) %>% ungroup()
+GH_AEZ_Map_Compare.df$SC <- factor(GH_AEZ_Map_Compare.df$SC, order = TRUE, levels = c("N", "S4", "S3", "S2", "S1", "S0"))
+GH_AEZ_Map_Compare.df$data_source <- factor(GH_AEZ_Map_Compare.df$data_source, levels = c('LPKS', 'SG', 'HWSD', 'WISE', 'ISDA'))
+
+saveRDS(GH_AEZ_Map_Compare.df, 'C:/R_Drive/Data_Files/LPKS_Data/R_Projects/LPKS.Ghana/data/LPKS/GH_AEZ_Map_Compare_df.RDS')
+```
+
+## Modified GAEZ analaysis on EPA subset
+```{r}
+reticulate::source_python("C:/R_Drive/Data_Files/LPKS_Data/R_Projects/SoilID/code/GAEZ_Func_Profile_Comp.py")
+
+GH_EPA_profile_list <- unique(LPKS_EPA_Soil_Map_Data$id)
+
+GH_EPA_AEZ_Map_Compare_list <- list()
+n <- length(GH_EPA_profile_list)
+pb <- txtProgressBar(min = 1, max = n, style=3)
+
+stime <- system.time({ 
+GH_EPA_AEZ_Map_Compare_list <- foreach(i=1:length(GH_EPA_profile_list), .packages = c("sf", "purrr", "stringr", "dplyr", "tidyr", "reticulate")) %do% { 
+  setTxtProgressBar(pb, i)
+  tryCatch({
+    lpks <- LPKS_EPA_Soil_Map_Data %>% dplyr::filter(id==GH_profile_list[i]) %>% dplyr::select(id, bedrock_depth = bedrock, bottom, texture, rfv) %>% dplyr::mutate(bedrock_depth = bedrock_depth %>% as.numeric() %>% tidyr::replace_na(NaN)) 
+    sg <- LPKS_EPA_Soil_Map_Data %>% dplyr::filter(id==GH_profile_list[i]) %>% dplyr::select(id, bedrock_depth=bedrock_sg, bottom, texture=texture_sg, rfv=rfv_sg) %>% dplyr::mutate(bedrock_depth = bedrock_depth %>% as.numeric() %>% tidyr::replace_na(NaN)) 
+    hwsd <- LPKS_EPA_Soil_Map_Data %>% dplyr::filter(id==GH_profile_list[i]) %>% dplyr::select(id, bedrock_depth=bedrock_hwsd, bottom, texture=texture_hwsd, rfv=rfv_hwsd) %>% dplyr::mutate(bedrock_depth = bedrock_depth %>% as.numeric() %>% tidyr::replace_na(NaN)) 
+    wise <- LPKS_EPA_Soil_Map_Data %>% dplyr::filter(id==GH_profile_list[i]) %>% dplyr::select(id, bedrock_depth=bedrock_wise, bottom, texture=texture_wise, rfv=rfv_wise) %>% dplyr::mutate(bedrock_depth = bedrock_depth %>% as.numeric() %>% tidyr::replace_na(NaN)) 
+    isda <- LPKS_EPA_Soil_Map_Data %>% dplyr::filter(id==GH_profile_list[i]) %>% dplyr::select(id, bedrock_depth=bedrock_isda, bottom, texture=texture_isda, rfv=rfv_isda) %>% dplyr::mutate(bedrock_depth = bedrock_depth %>% as.numeric() %>% tidyr::replace_na(NaN)) 
+    reticulate::source_python("C:/R_Drive/Data_Files/LPKS_Data/R_Projects/SoilID/code/GAEZ_Func_Profile_Comp.py")
+    Prof1 <- func_prof_comp_GAEZ_SQI(data=lpks, CROP_ID='4', inputLevel='L', depthWt_type=1) %>% dplyr::mutate(data_source=c("LPKS"))
+    Prof2 <- func_prof_comp_GAEZ_SQI(data=sg, CROP_ID='4', inputLevel='L', depthWt_type=1) %>% dplyr::mutate(data_source="SG")
+    Prof3 <- func_prof_comp_GAEZ_SQI(data=hwsd, CROP_ID='4', inputLevel='L', depthWt_type=1) %>% dplyr::mutate(data_source="HWSD")
+    Prof4 <- func_prof_comp_GAEZ_SQI(data=wise, CROP_ID='4', inputLevel='L', depthWt_type=1) %>% dplyr::mutate(data_source="WISE")
+    Prof5 <- func_prof_comp_GAEZ_SQI(data=isda, CROP_ID='4', inputLevel='L', depthWt_type=1) %>% dplyr::mutate(data_source="ISDA")
+    prof_all <-rbind(Prof1,Prof2,Prof3,Prof4,Prof5)
+    GH_EPA_AEZ_Map_Compare_list[[i]] <- prof_all
+  }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+close(pb)
+})[3]
+stime
+
+GH_EPA_AEZ_Map_Compare.df <- bind_rows(GH_EPA_AEZ_Map_Compare_list)
+
+GH_EPA_AEZ_Map_Compare.df <- GH_EPA_AEZ_Map_Compare.df %>% dplyr::mutate(SQ1=if_else(SQ1>100, 100, SQ1)) %>% dplyr::mutate(SQ3=if_else(SQ3>100, 100, SQ3)) %>% dplyr::mutate(SQ7=if_else(SQ7>100, 100, SQ7)) %>% rowwise() %>% dplyr::mutate(SR=SQ1*(SQ3/100)*(SQ7/100)) %>% ungroup()
+GH_EPA_AEZ_Map_Compare.df <- GH_EPA_AEZ_Map_Compare.df %>% rowwise() %>% dplyr::mutate(SC = S_Class(SR)) %>% ungroup()
+GH_EPA_AEZ_Map_Compare.df$SC <- factor(GH_EPA_AEZ_Map_Compare.df$SC, order = TRUE, levels = c("N", "S4", "S3", "S2", "S1", "S0"))
+GH_EPA_AEZ_Map_Compare.df$data_source <- factor(GH_EPA_AEZ_Map_Compare.df$data_source, levels = c('LPKS', 'SG', 'HWSD', 'WISE', 'ISDA'))
+
+saveRDS(GH_EPA_AEZ_Map_Compare.df, 'C:/R_Drive/Data_Files/LPKS_Data/R_Projects/LPKS.Ghana/data/derived_data/GH_EPA_AEZ_Map_Compare_df.RDS')
+
+GH_EPA_AEZ_Map_Compare.df <-  readRDS('C:/R_Drive/Data_Files/LPKS_Data/R_Projects/LPKS.Ghana/data/LPKS/GH_EPA_AEZ_Map_Compare_df.RDS')
+```
+
+## Modified GAEZ analaysis on EPA plot subset
+```{r}
+reticulate::source_python("C:/R_Drive/Data_Files/LPKS_Data/R_Projects/SoilID/code/GAEZ_Func_Profile_Comp.py")
+
+GH_Plot_profile_list <- unique(LPKS_Soil_Map_Plot_Data$farm)
+
+GH_Plot_AEZ_Map_Compare_list <- list()
+n <- length(GH_Plot_profile_list)
+pb <- txtProgressBar(min = 1, max = n, style=3)
+
+stime <- system.time({ 
+GH_Plot_AEZ_Map_Compare_list <- foreach(i=1:length(GH_Plot_profile_list), .packages = c("sf", "purrr", "stringr", "dplyr", "tidyr", "reticulate")) %do% { 
+  setTxtProgressBar(pb, i)
+  tryCatch({
+    lpks <- LPKS_Soil_Map_Plot_Data %>% dplyr::filter(farm==GH_Plot_profile_list[i]) %>% dplyr::select(id=farm, bedrock_depth = bedrock_plot, bottom, texture=texture_plot, rfv=rfv_plot) %>% dplyr::mutate(bedrock_depth = bedrock_depth %>% as.numeric() %>% tidyr::replace_na(NaN))
+    sg <- LPKS_Soil_Map_Plot_Data %>% dplyr::filter(farm==GH_Plot_profile_list[i]) %>% dplyr::select(id=farm, bedrock_depth=bedrock_sg_plot, bottom, texture=texture_sg_plot, rfv=rfv_sg_plot) %>% dplyr::mutate(bedrock_depth = bedrock_depth %>% as.numeric() %>% tidyr::replace_na(NaN)) 
+    hwsd <- LPKS_Soil_Map_Plot_Data %>% dplyr::filter(farm==GH_Plot_profile_list[i]) %>% dplyr::select(id=farm, bedrock_depth=bedrock_hwsd_plot, bottom, texture=texture_hwsd_plot, rfv=rfv_hwsd_plot) %>% dplyr::mutate(bedrock_depth = bedrock_depth %>% as.numeric() %>% tidyr::replace_na(NaN)) 
+    wise <- LPKS_Soil_Map_Plot_Data %>% dplyr::filter(farm==GH_Plot_profile_list[i]) %>% dplyr::select(id=farm, bedrock_depth=bedrock_wise_plot, bottom, texture=texture_wise_plot, rfv=rfv_wise_plot) %>% dplyr::mutate(bedrock_depth = bedrock_depth %>% as.numeric() %>% tidyr::replace_na(NaN)) 
+    isda <- LPKS_Soil_Map_Plot_Data %>% dplyr::filter(farm==GH_Plot_profile_list[i]) %>% dplyr::select(id=farm, bedrock_depth=bedrock_isda_plot, bottom, texture=texture_isda_plot, rfv=rfv_isda_plot) %>% dplyr::mutate(bedrock_depth = bedrock_depth %>% as.numeric() %>% tidyr::replace_na(NaN)) 
+    reticulate::source_python("C:/R_Drive/Data_Files/LPKS_Data/R_Projects/SoilID/code/GAEZ_Func_Profile_Comp.py")
+    Prof1 <- func_prof_comp_GAEZ_SQI(data=lpks, CROP_ID='4', inputLevel='L', depthWt_type=1) %>% dplyr::mutate(data_source=c("LPKS"))
+    Prof2 <- func_prof_comp_GAEZ_SQI(data=sg, CROP_ID='4', inputLevel='L', depthWt_type=1) %>% dplyr::mutate(data_source="SG")
+    Prof3 <- func_prof_comp_GAEZ_SQI(data=hwsd, CROP_ID='4', inputLevel='L', depthWt_type=1) %>% dplyr::mutate(data_source="HWSD")
+    Prof4 <- func_prof_comp_GAEZ_SQI(data=wise, CROP_ID='4', inputLevel='L', depthWt_type=1) %>% dplyr::mutate(data_source="WISE")
+    Prof5 <- func_prof_comp_GAEZ_SQI(data=isda, CROP_ID='4', inputLevel='L', depthWt_type=1) %>% dplyr::mutate(data_source="ISDA")
+    prof_all <-rbind(Prof1,Prof2,Prof3,Prof4,Prof5)
+    GH_Plot_AEZ_Map_Compare_list[[i]] <- prof_all
+  }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+close(pb)
+})[3]
+stime
+
+GH_Plot_AEZ_Map_Compare.df <- bind_rows(GH_Plot_AEZ_Map_Compare_list)
+
+GH_Plot_AEZ_Map_Compare.df <- GH_Plot_AEZ_Map_Compare.df %>% dplyr::mutate(SQ1=if_else(SQ1>100, 100, SQ1)) %>% dplyr::mutate(SQ3=if_else(SQ3>100, 100, SQ3)) %>% dplyr::mutate(SQ7=if_else(SQ7>100, 100, SQ7)) %>% rowwise() %>% dplyr::mutate(SR=SQ1*(SQ3/100)*(SQ7/100)) %>% ungroup()
+GH_Plot_AEZ_Map_Compare.df <- GH_Plot_AEZ_Map_Compare.df %>% rowwise() %>% dplyr::mutate(SC = S_Class(SR)) %>% ungroup()
+GH_Plot_AEZ_Map_Compare.df$SC <- factor(GH_Plot_AEZ_Map_Compare.df$SC, order = TRUE, levels = c("N", "S4", "S3", "S2", "S1", "S0"))
+GH_Plot_AEZ_Map_Compare.df$data_source <- factor(GH_Plot_AEZ_Map_Compare.df$data_source, levels = c('LPKS', 'SG', 'HWSD', 'WISE', 'ISDA'))
+
+saveRDS(GH_Plot_AEZ_Map_Compare.df, 'C:/R_Drive/Data_Files/LPKS_Data/R_Projects/LPKS.Ghana/data/LPKS/GH_Plot_AEZ_Map_Compare_df.RDS')
+
+GH_Plot_AEZ_Map_Compare.df <- readRDS('C:/R_Drive/Data_Files/LPKS_Data/R_Projects/LPKS.Ghana/data/LPKS/GH_Plot_AEZ_Map_Compare_df.RDS')
+```
+
+
+# Analysis and plotting of GAEZ
+
+## Analysis and plotting of GAEZ: Entire Dataset
+```{r}
+# -----------------------Suitablity class
+GH_AEZ_Map_Compare_SC <- GH_AEZ_Map_Compare.df  %>% dplyr::select(id, data_source, SC) %>% pivot_wider(names_from = data_source, values_from = SC)
+
+## Calculate match rate: H=high, L=low, M=match
+GH_AEZ_Map_Compare_SC <-  GH_AEZ_Map_Compare_SC %>% rowwise() %>% dplyr::mutate(SG_match=if_else(LPKS==SG,'M', if_else(LPKS>SG,'L', 'H'))) %>% dplyr::mutate(HWSD_match=if_else(LPKS==HWSD,'M', if_else(LPKS>HWSD,'L', 'H'))) %>% dplyr::mutate(WISE_match=if_else(LPKS==WISE,'M', if_else(LPKS>WISE,'L', 'H'))) %>% dplyr::mutate(ISDA_match=if_else(LPKS==ISDA,'M', if_else(LPKS>ISDA,'L', 'H')))
+
+SG_match <- GH_AEZ_Map_Compare_SC %>% dplyr::select(SG_match) %>% dplyr::group_by(SG_match) %>% tally()
+HWSD_match <- GH_AEZ_Map_Compare_SC %>% dplyr::select(HWSD_match) %>% dplyr::group_by(HWSD_match) %>% tally()
+WISE_match <- GH_AEZ_Map_Compare_SC %>% dplyr::select(WISE_match) %>% dplyr::group_by(WISE_match) %>% tally()
+ISDA_match <- GH_AEZ_Map_Compare_SC %>% dplyr::select(ISDA_match) %>% dplyr::group_by(ISDA_match) %>% tally()
+
+# Error matrices
+SG_sc_class <- table(GH_AEZ_Map_Compare_SC$SG,GH_AEZ_Map_Compare_SC$LPKS)
+HWSD_sc_class <- table(GH_AEZ_Map_Compare_SC$HWSD,GH_AEZ_Map_Compare_SC$LPKS)
+WISE_sc_class <- table(GH_AEZ_Map_Compare_SC$WISE,GH_AEZ_Map_Compare_SC$LPKS)
+ISDA_sc_class <- table(GH_AEZ_Map_Compare_SC$ISDA,GH_AEZ_Map_Compare_SC$LPKS)
+
+caret::confusionMatrix(SG_sc_class, mode = "prec_recall")
+caret::confusionMatrix(HWSD_sc_class, mode = "prec_recall")
+caret::confusionMatrix(WISE_sc_class, mode = "prec_recall")
+caret::confusionMatrix(ISDA_sc_class, mode = "prec_recall")
+
+## Accuracy Statistics from 'measures' package
+MMCE(lpks_truth_rfv_class,wise_rfv_class)
+ACC(lpks_truth_rfv_class,wise_rfv_class)
+BER(lpks_truth_rfv_class,wise_rfv_class)
+KAPPA(lpks_truth_rfv_class,wise_rfv_class)
+
+
+# -----------------------Suitablity ratio
+GH_SR <- GH_AEZ_Map_Compare.df %>% dplyr::select(id, Input_Level=`Input Level`, SR, source=data_source)
+GH_SR <- GH_SR %>%  dplyr::mutate(source = case_when(source == 'LPKS' ~ 'LPKS',
+                           source == 'HWSD' ~ 'HWSD',
+                           source == 'WISE' ~ 'WISE',
+                           source == 'ISDA' ~ 'ISDA',
+                           TRUE ~ 'SG')) %>% ungroup()
+
+GH_SR$source <- factor(GH_SR$source, levels = c('LPKS', 'SG', 'HWSD', 'WISE', 'ISDA'))
+GH_SR %>% dplyr::group_by(source) %>% dplyr::summarize(mean(SR, na.rm=T), sd(SR, na.rm=T))
+SR_aov <- aov(GH_SR$SR ~ GH_SR$source)
+SR_posthoc <- TukeyHSD(x=SR_aov, 'GH_SR$source', conf.level=0.99999)
+plot(SR_posthoc , las=1 , col="brown")
+
+# Apply the function on my dataset
+LABELS <- generate_label_df(SR_posthoc, "GH_SR$source")
+my_colors <- rainbow_hcl(5)
+
+# Draw the basic boxplot of Suitability Ratio
+pdf(here("analysis/figures/GH_Soil_Map/GH_SR_boxplot.pdf"), width = 6.5, height = 4.5)
+boxplot(GH_SR$SR ~ GH_SR$source , ylim=c(0,100), col=my_colors[as.numeric(LABELS[,3])] , ylab="Soil Suitability" , xlab="Soil Map" ,main="Maize Soil Suitability")
+dev.off()
+
+# Barplot of suitability class
+col_bl <- c("#4575b4","#91bfdb", "#e0f3f8", "#fee090", "#fc8d59", "#d73027")
+agg <- count(GH_AEZ_Map_Compare.df %>% ungroup() %>% dplyr::filter(data_source != "SG1") %>% dplyr::group_by(data_source), SC)  
+pdf(here("analysis/figures/GH_Soil_Map/GH_AEZ_barplot.pdf"), width = 6.5, height = 4.5)
+  ggplot(agg) +
+      geom_col(aes(x = data_source, y = n, fill = forcats::fct_rev(SC))) +
+      scale_fill_manual(values = col_bl)
+dev.off() 
+
+# Plotting of individual soil suitability indices
+# SQ1
+GH_SQ1 <- GH_AEZ_Map_Compare.df %>% dplyr::select(id, Input_Level=`Input Level`, SQ1, source=data_source) %>% dplyr::filter(source!='SG1')
+GH_SQ1 <- GH_SQ1 %>%  dplyr::mutate(source = case_when(source == 'LPKS' ~ 'LPKS',
+                           source == 'HWSD' ~ 'HWSD',
+                           source == 'WISE' ~ 'WISE',
+                           source == 'ISDA' ~ 'ISDA',
+                           TRUE ~ 'SG')) %>% ungroup()
+
+GH_SQ1$source <- factor(GH_SQ1$source, levels = c('LPKS', 'SG', 'HWSD', 'WISE', 'ISDA'))
+GH_SQ1 %>% dplyr::group_by(source) %>% dplyr::summarize(mean(SQ1, na.rm=T), sd(SQ1, na.rm=T))
+SQ1_aov <- aov(GH_SQ1$SQ1 ~ GH_SQ1$source)
+SQ1_posthoc <- TukeyHSD(x=SQ1_aov, 'GH_SQ1$source', conf.level=0.99999)
+plot(SQ1_posthoc , las=1 , col="brown")
+# Apply the function on my dataset
+LABELS <- generate_label_df(SQ1_posthoc, "GH_SQ1$source")
+my_colors <- rainbow_hcl(5)
+
+
+# Draw the basic boxplot
+pdf(here("analysis/figures/GH_Soil_Map/GH_SQ1_boxplot.pdf"), width = 6.5, height = 4.5)
+a <- boxplot(GH_SQ1$SQ1 ~ GH_SQ1$source , ylim=c(0,100), col=my_colors[as.numeric(LABELS[,3])] , ylab="SQ1" , xlab="Soil Map" ,main="Maize Soil Suitability")
+dev.off()
+
+GH_SQ1 <- GH_SQ1 %>% rowwise() %>% dplyr::mutate(SQ1_SC = S_Class(SQ1))
+GH_SQ1$SQ1_SC <- factor(GH_SQ1$SQ1_SC, order = TRUE, levels = c("N", "S4", "S3", "S2", "S1", "S0"))
+
+
+col_bl <- c("#4575b4","#91bfdb", "#e0f3f8", "#fee090", "#fc8d59", "#d73027")
+agg_SQ1 <- count(GH_SQ1 %>% ungroup() %>% dplyr::filter(source != "SG1") %>% dplyr::group_by(source), SQ1_SC)  
+pdf(here("analysis/figures/GH_Soil_Map/GH_SQ1_barplot.pdf"), width = 6.5, height = 4.5)
+  ggplot(agg_SQ1) +
+      geom_col(aes(x = source, y = n, fill = forcats::fct_rev(SQ1_SC))) +
+      scale_fill_manual(values = col_bl)
+  
+dev.off() 
+
+
+# SQ3
+GH_SQ3 <- GH_AEZ_Map_Compare.df %>% dplyr::select(id, Input_Level=`Input Level`, SQ3, source=data_source) %>% dplyr::filter(source!='SG1')
+GH_SQ3 <- GH_SQ3 %>%  dplyr::mutate(source = case_when(source == 'LPKS' ~ 'LPKS',
+                           source == 'HWSD' ~ 'HWSD',
+                           source == 'WISE' ~ 'WISE',
+                           source == 'ISDA' ~ 'ISDA',
+                           TRUE ~ 'SG')) %>% ungroup()
+
+GH_SQ3$source <- factor(GH_SQ3$source, levels = c('LPKS', 'SG', 'HWSD', 'WISE', 'ISDA'))
+GH_SQ3 %>% dplyr::group_by(source) %>% dplyr::summarize(mean(SQ3, na.rm=T), sd(SQ3, na.rm=T))
+SQ3_aov <- aov(GH_SQ3$SQ3 ~ GH_SQ3$source)
+SQ3_posthoc <- TukeyHSD(x=SQ3_aov, 'GH_SQ3$source', conf.level=0.99999)
+plot(SQ3_posthoc , las=1 , col="brown")
+# Apply the function on my dataset
+LABELS <- generate_label_df(SQ3_posthoc, "GH_SQ3$source")
+my_colors <- rainbow_hcl(5)
+
+
+# Draw the basic boxplot
+pdf(here("analysis/figures/GH_Soil_Map/GH_SQ3_boxplot.pdf"), width = 6.5, height = 4.5)
+a <- boxplot(GH_SQ3$SQ3 ~ GH_SQ3$source , ylim=c(0,100), col=my_colors[as.numeric(LABELS[,3])] , ylab="SQ3" , xlab="Soil Map" ,main="Maize Soil Suitability")
+dev.off()
+
+GH_SQ3 <- GH_SQ3 %>% rowwise() %>% dplyr::mutate(SQ3_SC = S_Class(SQ3))
+GH_SQ3$SQ3_SC <- factor(GH_SQ3$SQ3_SC, order = TRUE, levels = c("N", "S4", "S3", "S2", "S1", "S0"))
+
+
+col_bl <- c("#4575b4","#91bfdb", "#e0f3f8", "#fee090", "#fc8d59", "#d73027")
+agg_SQ3 <- count(GH_SQ3 %>% ungroup() %>% dplyr::filter(source != "SG1") %>% dplyr::group_by(source), SQ3_SC)  
+pdf(here("analysis/figures/GH_Soil_Map/GH_SQ3_barplot.pdf"), width = 6.5, height = 4.5)
+ ggplot(agg_SQ3) +
+      geom_col(aes(x = source, y = n, fill = forcats::fct_rev(SQ3_SC))) +
+      scale_fill_manual(values = col_bl)
+
+dev.off() 
+
+
+# SQ7
+GH_SQ7 <- GH_AEZ_Map_Compare.df %>% dplyr::select(id, Input_Level=`Input Level`, SQ7, source=data_source) %>% dplyr::filter(source!='SG1')
+GH_SQ7 <- GH_SQ7 %>%  dplyr::mutate(source = case_when(source == 'LPKS' ~ 'LPKS',
+                           source == 'HWSD' ~ 'HWSD',
+                           source == 'WISE' ~ 'WISE',
+                           source == 'ISDA' ~ 'ISDA',
+                           TRUE ~ 'SG')) %>% ungroup()
+
+GH_SQ7$source <- factor(GH_SQ7$source, levels = c('LPKS', 'SG', 'HWSD', 'WISE', 'ISDA'))
+GH_SQ7 %>% dplyr::group_by(source) %>% dplyr::summarize(mean(SQ7, na.rm=T), sd(SQ7, na.rm=T))
+SQ7_aov <- aov(GH_SQ7$SQ7 ~ GH_SQ7$source)
+SQ7_posthoc <- TukeyHSD(x=SQ7_aov, 'GH_SQ7$source', conf.level=0.99999)
+plot(SQ7_posthoc , las=1 , col="brown")
+# Apply the function on my dataset
+LABELS <- generate_label_df(SQ7_posthoc, "GH_SQ7$source")
+my_colors <- rainbow_hcl(5)
+
+
+# Draw the basic boxplot
+pdf(here("analysis/figures/GH_Soil_Map/GH_SQ7_boxplot.pdf"), width = 6.5, height = 4.5)
+a <- boxplot(GH_SQ7$SQ7 ~ GH_SQ7$source , ylim=c(0,100), col=my_colors[as.numeric(LABELS[,3])] , ylab="SQ7" , xlab="Soil Map" ,main="Maize Soil Suitability")
+dev.off()
+
+GH_SQ7 <- GH_SQ7 %>% rowwise() %>% dplyr::mutate(SQ7_SC = S_Class(SQ7))
+GH_SQ7$SQ7_SC <- factor(GH_SQ7$SQ7_SC, order = TRUE, levels = c("N", "S4", "S3", "S2", "S1", "S0"))
+
+
+col_bl <- c("#4575b4","#91bfdb", "#e0f3f8", "#fee090", "#fc8d59", "#d73027")
+agg_SQ7 <- count(GH_SQ7 %>% ungroup() %>% dplyr::filter(source != "SG1") %>% dplyr::group_by(source), SQ7_SC)  
+pdf(here("analysis/figures/GH_Soil_Map/GH_SQ7_barplot.pdf"), width = 6.5, height = 4.5)
+  ggplot(agg_SQ7) +
+      geom_col(aes(x = source, y = n, fill = forcats::fct_rev(SQ7_SC))) +
+      scale_fill_manual(values = col_bl)
+
+dev.off()
+
+```
+
+## Analysis and plotting of GAEZ: EPA Dataset
+```{r}
+# -----------------------Suitablity class
+GH_EPA_AEZ_Map_Compare_SC <- GH_EPA_AEZ_Map_Compare.df  %>% dplyr::select(id, data_source, SC) %>% pivot_wider(names_from = data_source, values_from = SC)
+
+## Calculate match rate: H=high, L=low, M=match
+GH_EPA_AEZ_Map_Compare_SC <-  GH_EPA_AEZ_Map_Compare_SC %>% rowwise() %>% dplyr::mutate(SG_match=if_else(LPKS==SG,'M', if_else(LPKS>SG,'L', 'H'))) %>% dplyr::mutate(HWSD_match=if_else(LPKS==HWSD,'M', if_else(LPKS>HWSD,'L', 'H'))) %>% dplyr::mutate(WISE_match=if_else(LPKS==WISE,'M', if_else(LPKS>WISE,'L', 'H'))) %>% dplyr::mutate(ISDA_match=if_else(LPKS==ISDA,'M', if_else(LPKS>ISDA,'L', 'H'))) %>% ungroup()
+
+SG_match <- GH_EPA_AEZ_Map_Compare_SC %>% dplyr::select(SG_match) %>% dplyr::group_by(SG_match) %>% tally()
+HWSD_match <- GH_EPA_AEZ_Map_Compare_SC %>% dplyr::select(HWSD_match) %>% dplyr::group_by(HWSD_match) %>% tally()
+WISE_match <- GH_EPA_AEZ_Map_Compare_SC %>% dplyr::select(WISE_match) %>% dplyr::group_by(WISE_match) %>% tally()
+ISDA_match <- GH_EPA_AEZ_Map_Compare_SC %>% dplyr::select(ISDA_match) %>% dplyr::group_by(ISDA_match) %>% tally()
+
+# Error matrices
+SG_sc_class <- table(GH_EPA_AEZ_Map_Compare_SC$SG,GH_EPA_AEZ_Map_Compare_SC$LPKS)
+HWSD_sc_class <- table(GH_EPA_AEZ_Map_Compare_SC$HWSD,GH_EPA_AEZ_Map_Compare_SC$LPKS)
+WISE_sc_class <- table(GH_EPA_AEZ_Map_Compare_SC$WISE,GH_EPA_AEZ_Map_Compare_SC$LPKS)
+ISDA_sc_class <- table(GH_EPA_AEZ_Map_Compare_SC$ISDA,GH_EPA_AEZ_Map_Compare_SC$LPKS)
+
+caret::confusionMatrix(SG_sc_class, mode = "prec_recall")
+caret::confusionMatrix(HWSD_sc_class, mode = "prec_recall")
+caret::confusionMatrix(WISE_sc_class, mode = "prec_recall")
+caret::confusionMatrix(ISDA_sc_class, mode = "prec_recall")
+
+## Accuracy Statistics from 'measures' package
+MMCE(lpks_truth_rfv_class,wise_rfv_class)
+ACC(lpks_truth_rfv_class,wise_rfv_class)
+BER(lpks_truth_rfv_class,wise_rfv_class)
+KAPPA(lpks_truth_rfv_class,wise_rfv_class)
+
+
+# -----------------------Suitablity ratio
+GH_EPA_SR <- GH_EPA_AEZ_Map_Compare.df %>% dplyr::select(id, Input_Level=`Input Level`, SR, source=data_source)
+GH_EPA_SR <- GH_EPA_SR %>%  dplyr::mutate(source = case_when(source == 'LPKS' ~ 'LPKS',
+                           source == 'HWSD' ~ 'HWSD',
+                           source == 'WISE' ~ 'WISE',
+                           source == 'ISDA' ~ 'ISDA',
+                           TRUE ~ 'SG')) %>% ungroup()
+
+GH_EPA_SR$source <- factor(GH_EPA_SR$source, levels = c('LPKS', 'SG', 'HWSD', 'WISE', 'ISDA'))
+GH_EPA_SR %>% dplyr::group_by(source) %>% dplyr::summarize(mean(SR, na.rm=T), sd(SR, na.rm=T))
+SR_aov <- aov(GH_EPA_SR$SR ~ GH_EPA_SR$source)
+SR_posthoc <- TukeyHSD(x=SR_aov, 'GH_EPA_SR$source', conf.level=0.99999)
+plot(SR_posthoc , las=1 , col="brown")
+
+# Apply the function on my dataset
+LABELS <- generate_label_df(SR_posthoc, "GH_EPA_SR$source")
+my_colors <- rainbow_hcl(5)
+
+# Draw the basic boxplot of Suitability Ratio
+pdf(here("analysis/figures/GH_Soil_Map/GH_EPA_SR_boxplot.pdf"), width = 6.5, height = 4.5)
+boxplot(GH_EPA_SR$SR ~ GH_EPA_SR$source , ylim=c(0,100), col=my_colors[as.numeric(LABELS[,3])] , ylab="Soil Suitability" , xlab="Soil Map" ,main="Maize Soil Suitability")
+dev.off()
+
+# Barplot of suitability class
+col_bl <- c("#4575b4","#91bfdb", "#e0f3f8", "#fee090", "#fc8d59", "#d73027")
+agg <- count(GH_EPA_AEZ_Map_Compare.df %>% ungroup() %>% dplyr::filter(data_source != "SG1") %>% dplyr::group_by(data_source), SC)  
+pdf(here("analysis/figures/GH_Soil_Map/GH_EPA_AEZ_barplot.pdf"), width = 6.5, height = 4.5)
+  ggplot(agg) +
+      geom_col(aes(x = data_source, y = n, fill = forcats::fct_rev(SC))) +
+      scale_fill_manual(values = col_bl)
+dev.off() 
+
+# Plotting of individual soil suitability indices
+# SQ1
+GH_EPA_SQ1 <- GH_EPA_AEZ_Map_Compare.df %>% dplyr::select(id, Input_Level=`Input Level`, SQ1, source=data_source) %>% dplyr::filter(source!='SG1')
+GH_EPA_SQ1 <- GH_EPA_SQ1 %>%  dplyr::mutate(source = case_when(source == 'LPKS' ~ 'LPKS',
+                           source == 'HWSD' ~ 'HWSD',
+                           source == 'WISE' ~ 'WISE',
+                           source == 'ISDA' ~ 'ISDA',
+                           TRUE ~ 'SG')) %>% ungroup()
+
+GH_EPA_SQ1$source <- factor(GH_EPA_SQ1$source, levels = c('LPKS', 'SG', 'HWSD', 'WISE', 'ISDA'))
+GH_EPA_SQ1 %>% dplyr::group_by(source) %>% dplyr::summarize(mean(SQ1, na.rm=T), sd(SQ1, na.rm=T))
+SQ1_aov <- aov(GH_EPA_SQ1$SQ1 ~ GH_EPA_SQ1$source)
+SQ1_posthoc <- TukeyHSD(x=SQ1_aov, 'GH_EPA_SQ1$source', conf.level=0.99999)
+plot(SQ1_posthoc , las=1 , col="brown")
+# Apply the function on my dataset
+LABELS <- generate_label_df(SQ1_posthoc, "GH_EPA_SQ1$source")
+my_colors <- rainbow_hcl(5)
+
+
+# Draw the basic boxplot
+pdf(here("analysis/figures/GH_Soil_Map/GH_EPA_SQ1_boxplot.pdf"), width = 6.5, height = 4.5)
+a <- boxplot(GH_EPA_SQ1$SQ1 ~ GH_EPA_SQ1$source , ylim=c(0,100), col=my_colors[as.numeric(LABELS[,3])] , ylab="SQ1" , xlab="Soil Map" ,main="Maize Soil Suitability")
+dev.off()
+
+GH_EPA_SQ1 <- GH_EPA_SQ1 %>% rowwise() %>% dplyr::mutate(SQ1_SC = S_Class(SQ1))
+GH_EPA_SQ1$SQ1_SC <- factor(GH_EPA_SQ1$SQ1_SC, order = TRUE, levels = c("N", "S4", "S3", "S2", "S1", "S0"))
+
+
+col_bl <- c("#4575b4","#91bfdb", "#e0f3f8", "#fee090", "#fc8d59", "#d73027")
+agg_SQ1 <- count(GH_EPA_SQ1 %>% ungroup() %>% dplyr::filter(source != "SG1") %>% dplyr::group_by(source), SQ1_SC)  
+pdf(here("analysis/figures/GH_Soil_Map/GH_EPA_SQ1_barplot.pdf"), width = 6.5, height = 4.5)
+  ggplot(agg_SQ1) +
+      geom_col(aes(x = source, y = n, fill = forcats::fct_rev(SQ1_SC))) +
+      scale_fill_manual(values = col_bl)
+  
+dev.off() 
+
+
+# SQ3
+GH_EPA_SQ3 <- GH_EPA_AEZ_Map_Compare.df %>% dplyr::select(id, Input_Level=`Input Level`, SQ3, source=data_source) %>% dplyr::filter(source!='SG1')
+GH_EPA_SQ3 <- GH_EPA_SQ3 %>%  dplyr::mutate(source = case_when(source == 'LPKS' ~ 'LPKS',
+                           source == 'HWSD' ~ 'HWSD',
+                           source == 'WISE' ~ 'WISE',
+                           source == 'ISDA' ~ 'ISDA',
+                           TRUE ~ 'SG')) %>% ungroup()
+
+GH_EPA_SQ3$source <- factor(GH_EPA_SQ3$source, levels = c('LPKS', 'SG', 'HWSD', 'WISE', 'ISDA'))
+GH_EPA_SQ3 %>% dplyr::group_by(source) %>% dplyr::summarize(mean(SQ3, na.rm=T), sd(SQ3, na.rm=T))
+SQ3_aov <- aov(GH_EPA_SQ3$SQ3 ~ GH_EPA_SQ3$source)
+SQ3_posthoc <- TukeyHSD(x=SQ3_aov, 'GH_EPA_SQ3$source', conf.level=0.99999)
+plot(SQ3_posthoc , las=1 , col="brown")
+# Apply the function on my dataset
+LABELS <- generate_label_df(SQ3_posthoc, "GH_EPA_SQ3$source")
+my_colors <- rainbow_hcl(5)
+
+
+# Draw the basic boxplot
+pdf(here("analysis/figures/GH_Soil_Map/GH_EPA_SQ3_boxplot.pdf"), width = 6.5, height = 4.5)
+a <- boxplot(GH_EPA_SQ3$SQ3 ~ GH_EPA_SQ3$source , ylim=c(0,100), col=my_colors[as.numeric(LABELS[,3])] , ylab="SQ3" , xlab="Soil Map" ,main="Maize Soil Suitability")
+dev.off()
+
+GH_EPA_SQ3 <- GH_EPA_SQ3 %>% rowwise() %>% dplyr::mutate(SQ3_SC = S_Class(SQ3))
+GH_EPA_SQ3$SQ3_SC <- factor(GH_EPA_SQ3$SQ3_SC, order = TRUE, levels = c("N", "S4", "S3", "S2", "S1", "S0"))
+
+
+col_bl <- c("#4575b4","#91bfdb", "#e0f3f8", "#fee090", "#fc8d59", "#d73027")
+agg_SQ3 <- count(GH_EPA_SQ3 %>% ungroup() %>% dplyr::filter(source != "SG1") %>% dplyr::group_by(source), SQ3_SC)  
+pdf(here("analysis/figures/GH_Soil_Map/GH_EPA_SQ3_barplot.pdf"), width = 6.5, height = 4.5)
+ ggplot(agg_SQ3) +
+      geom_col(aes(x = source, y = n, fill = forcats::fct_rev(SQ3_SC))) +
+      scale_fill_manual(values = col_bl)
+
+dev.off() 
+
+
+# SQ7
+GH_EPA_SQ7 <- GH_EPA_AEZ_Map_Compare.df %>% dplyr::select(id, Input_Level=`Input Level`, SQ7, source=data_source) %>% dplyr::filter(source!='SG1')
+GH_EPA_SQ7 <- GH_EPA_SQ7 %>%  dplyr::mutate(source = case_when(source == 'LPKS' ~ 'LPKS',
+                           source == 'HWSD' ~ 'HWSD',
+                           source == 'WISE' ~ 'WISE',
+                           source == 'ISDA' ~ 'ISDA',
+                           TRUE ~ 'SG')) %>% ungroup()
+
+GH_EPA_SQ7$source <- factor(GH_EPA_SQ7$source, levels = c('LPKS', 'SG', 'HWSD', 'WISE', 'ISDA'))
+GH_EPA_SQ7 %>% dplyr::group_by(source) %>% dplyr::summarize(mean(SQ7, na.rm=T), sd(SQ7, na.rm=T))
+SQ7_aov <- aov(GH_EPA_SQ7$SQ7 ~ GH_EPA_SQ7$source)
+SQ7_posthoc <- TukeyHSD(x=SQ7_aov, 'GH_EPA_SQ7$source', conf.level=0.99999)
+plot(SQ7_posthoc , las=1 , col="brown")
+# Apply the function on my dataset
+LABELS <- generate_label_df(SQ7_posthoc, "GH_EPA_SQ7$source")
+my_colors <- rainbow_hcl(5)
+
+
+# Draw the basic boxplot
+pdf(here("analysis/figures/GH_Soil_Map/GH_EPA_SQ7_boxplot.pdf"), width = 6.5, height = 4.5)
+a <- boxplot(GH_EPA_SQ7$SQ7 ~ GH_EPA_SQ7$source , ylim=c(0,100), col=my_colors[as.numeric(LABELS[,3])] , ylab="SQ7" , xlab="Soil Map" ,main="Maize Soil Suitability")
+dev.off()
+
+GH_EPA_SQ7 <- GH_EPA_SQ7 %>% rowwise() %>% dplyr::mutate(SQ7_SC = S_Class(SQ7))
+GH_EPA_SQ7$SQ7_SC <- factor(GH_EPA_SQ7$SQ7_SC, order = TRUE, levels = c("N", "S4", "S3", "S2", "S1", "S0"))
+
+
+col_bl <- c("#4575b4","#91bfdb", "#e0f3f8", "#fee090", "#fc8d59", "#d73027")
+agg_SQ7 <- count(GH_EPA_SQ7 %>% ungroup() %>% dplyr::filter(source != "SG1") %>% dplyr::group_by(source), SQ7_SC)  
+pdf(here("analysis/figures/GH_Soil_Map/GH_EPA_SQ7_barplot.pdf"), width = 6.5, height = 4.5)
+  ggplot(agg_SQ7) +
+      geom_col(aes(x = source, y = n, fill = forcats::fct_rev(SQ7_SC))) +
+      scale_fill_manual(values = col_bl)
+
+dev.off()
+
+```
+
+
+## Analysis and plotting of GAEZ: Plot Dataset
+```{r}
+# -----------------------Suitablity class
+GH_Plot_AEZ_Map_Compare_SC <- GH_Plot_AEZ_Map_Compare.df  %>% dplyr::select(id, data_source, SC) %>% pivot_wider(names_from = data_source, values_from = SC)
+
+## Calculate match rate: H=high, L=low, M=match
+GH_Plot_AEZ_Map_Compare_SC <-  GH_Plot_AEZ_Map_Compare_SC %>% rowwise() %>% dplyr::mutate(SG_match=if_else(LPKS==SG,'M', if_else(LPKS>SG,'L', 'H'))) %>% dplyr::mutate(HWSD_match=if_else(LPKS==HWSD,'M', if_else(LPKS>HWSD,'L', 'H'))) %>% dplyr::mutate(WISE_match=if_else(LPKS==WISE,'M', if_else(LPKS>WISE,'L', 'H'))) %>% dplyr::mutate(ISDA_match=if_else(LPKS==ISDA,'M', if_else(LPKS>ISDA,'L', 'H'))) %>% ungroup()
+
+SG_match <- GH_Plot_AEZ_Map_Compare_SC %>% dplyr::select(SG_match) %>% dplyr::group_by(SG_match) %>% tally()
+HWSD_match <- GH_Plot_AEZ_Map_Compare_SC %>% dplyr::select(HWSD_match) %>% dplyr::group_by(HWSD_match) %>% tally()
+WISE_match <- GH_Plot_AEZ_Map_Compare_SC %>% dplyr::select(WISE_match) %>% dplyr::group_by(WISE_match) %>% tally()
+ISDA_match <- GH_Plot_AEZ_Map_Compare_SC %>% dplyr::select(ISDA_match) %>% dplyr::group_by(ISDA_match) %>% tally()
+
+# Error matrices
+SG_sc_class <- table(GH_Plot_AEZ_Map_Compare_SC$SG,GH_Plot_AEZ_Map_Compare_SC$LPKS)
+HWSD_sc_class <- table(GH_Plot_AEZ_Map_Compare_SC$HWSD,GH_Plot_AEZ_Map_Compare_SC$LPKS)
+WISE_sc_class <- table(GH_Plot_AEZ_Map_Compare_SC$WISE,GH_Plot_AEZ_Map_Compare_SC$LPKS)
+ISDA_sc_class <- table(GH_Plot_AEZ_Map_Compare_SC$ISDA,GH_Plot_AEZ_Map_Compare_SC$LPKS)
+
+caret::confusionMatrix(SG_sc_class, mode = "prec_recall")
+caret::confusionMatrix(HWSD_sc_class, mode = "prec_recall")
+caret::confusionMatrix(WISE_sc_class, mode = "prec_recall")
+caret::confusionMatrix(ISDA_sc_class, mode = "prec_recall")
+
+## Accuracy Statistics from 'measures' package
+MMCE(lpks_truth_rfv_class,wise_rfv_class)
+ACC(lpks_truth_rfv_class,wise_rfv_class)
+BER(lpks_truth_rfv_class,wise_rfv_class)
+KAPPA(lpks_truth_rfv_class,wise_rfv_class)
+
+
+# -----------------------Suitablity ratio
+GH_Plot_SR <- GH_Plot_AEZ_Map_Compare.df %>% dplyr::select(id, Input_Level=`Input Level`, SR, source=data_source)
+GH_Plot_SR <- GH_Plot_SR %>%  dplyr::mutate(source = case_when(source == 'LPKS' ~ 'LPKS',
+                           source == 'HWSD' ~ 'HWSD',
+                           source == 'WISE' ~ 'WISE',
+                           source == 'ISDA' ~ 'ISDA',
+                           TRUE ~ 'SG')) %>% ungroup()
+
+GH_Plot_SR$source <- factor(GH_Plot_SR$source, levels = c('LPKS', 'SG', 'HWSD', 'WISE', 'ISDA'))
+GH_Plot_SR %>% dplyr::group_by(source) %>% dplyr::summarize(mean(SR, na.rm=T), sd(SR, na.rm=T))
+SR_aov <- aov(GH_Plot_SR$SR ~ GH_Plot_SR$source)
+SR_posthoc <- TukeyHSD(x=SR_aov, 'GH_Plot_SR$source', conf.level=0.99999)
+plot(SR_posthoc , las=1 , col="brown")
+
+# Apply the function on my dataset
+LABELS <- generate_label_df(SR_posthoc, "GH_Plot_SR$source")
+my_colors <- rainbow_hcl(5)
+
+# Draw the basic boxplot of Suitability Ratio
+pdf(here("analysis/figures/GH_Soil_Map/GH_Plot_SR_boxplot.pdf"), width = 6.5, height = 4.5)
+boxplot(GH_Plot_SR$SR ~ GH_Plot_SR$source , ylim=c(0,100), col=my_colors[as.numeric(LABELS[,3])] , ylab="Soil Suitability" , xlab="Soil Map" ,main="Maize Soil Suitability")
+dev.off()
+
+# Barplot of suitability class
+col_bl <- c("#4575b4","#91bfdb", "#e0f3f8", "#fee090", "#fc8d59", "#d73027")
+agg <- count(GH_Plot_AEZ_Map_Compare.df %>% ungroup() %>% dplyr::filter(data_source != "SG1") %>% dplyr::group_by(data_source), SC)  
+pdf(here("analysis/figures/GH_Soil_Map/GH_Plot_AEZ_barplot.pdf"), width = 6.5, height = 4.5)
+  ggplot(agg) +
+      geom_col(aes(x = data_source, y = n, fill = forcats::fct_rev(SC))) +
+      scale_fill_manual(values = col_bl)
+dev.off() 
+
+# Plotting of individual soil suitability indices
+# SQ1
+GH_Plot_SQ1 <- GH_Plot_AEZ_Map_Compare.df %>% dplyr::select(id, Input_Level=`Input Level`, SQ1, source=data_source) %>% dplyr::filter(source!='SG1')
+GH_Plot_SQ1 <- GH_Plot_SQ1 %>%  dplyr::mutate(source = case_when(source == 'LPKS' ~ 'LPKS',
+                           source == 'HWSD' ~ 'HWSD',
+                           source == 'WISE' ~ 'WISE',
+                           source == 'ISDA' ~ 'ISDA',
+                           TRUE ~ 'SG')) %>% ungroup()
+
+GH_Plot_SQ1$source <- factor(GH_Plot_SQ1$source, levels = c('LPKS', 'SG', 'HWSD', 'WISE', 'ISDA'))
+GH_Plot_SQ1 %>% dplyr::group_by(source) %>% dplyr::summarize(mean(SQ1, na.rm=T), sd(SQ1, na.rm=T))
+SQ1_aov <- aov(GH_Plot_SQ1$SQ1 ~ GH_Plot_SQ1$source)
+SQ1_posthoc <- TukeyHSD(x=SQ1_aov, 'GH_Plot_SQ1$source', conf.level=0.99999)
+plot(SQ1_posthoc , las=1 , col="brown")
+# Apply the function on my dataset
+LABELS <- generate_label_df(SQ1_posthoc, "GH_Plot_SQ1$source")
+my_colors <- rainbow_hcl(5)
+
+
+# Draw the basic boxplot
+pdf(here("analysis/figures/GH_Soil_Map/GH_Plot_SQ1_boxplot.pdf"), width = 6.5, height = 4.5)
+a <- boxplot(GH_Plot_SQ1$SQ1 ~ GH_Plot_SQ1$source , ylim=c(0,100), col=my_colors[as.numeric(LABELS[,3])] , ylab="SQ1" , xlab="Soil Map" ,main="Maize Soil Suitability")
+dev.off()
+
+GH_Plot_SQ1 <- GH_Plot_SQ1 %>% rowwise() %>% dplyr::mutate(SQ1_SC = S_Class(SQ1))
+GH_Plot_SQ1$SQ1_SC <- factor(GH_Plot_SQ1$SQ1_SC, order = TRUE, levels = c("N", "S4", "S3", "S2", "S1", "S0"))
+
+
+col_bl <- c("#4575b4","#91bfdb", "#e0f3f8", "#fee090", "#fc8d59", "#d73027")
+agg_SQ1 <- count(GH_Plot_SQ1 %>% ungroup() %>% dplyr::filter(source != "SG1") %>% dplyr::group_by(source), SQ1_SC)  
+pdf(here("analysis/figures/GH_Soil_Map/GH_Plot_SQ1_barplot.pdf"), width = 6.5, height = 4.5)
+  ggplot(agg_SQ1) +
+      geom_col(aes(x = source, y = n, fill = forcats::fct_rev(SQ1_SC))) +
+      scale_fill_manual(values = col_bl)
+  
+dev.off() 
+
+
+# SQ3
+GH_Plot_SQ3 <- GH_Plot_AEZ_Map_Compare.df %>% dplyr::select(id, Input_Level=`Input Level`, SQ3, source=data_source) %>% dplyr::filter(source!='SG1')
+GH_Plot_SQ3 <- GH_Plot_SQ3 %>%  dplyr::mutate(source = case_when(source == 'LPKS' ~ 'LPKS',
+                           source == 'HWSD' ~ 'HWSD',
+                           source == 'WISE' ~ 'WISE',
+                           source == 'ISDA' ~ 'ISDA',
+                           TRUE ~ 'SG')) %>% ungroup()
+
+GH_Plot_SQ3$source <- factor(GH_Plot_SQ3$source, levels = c('LPKS', 'SG', 'HWSD', 'WISE', 'ISDA'))
+GH_Plot_SQ3 %>% dplyr::group_by(source) %>% dplyr::summarize(mean(SQ3, na.rm=T), sd(SQ3, na.rm=T))
+SQ3_aov <- aov(GH_Plot_SQ3$SQ3 ~ GH_Plot_SQ3$source)
+SQ3_posthoc <- TukeyHSD(x=SQ3_aov, 'GH_Plot_SQ3$source', conf.level=0.99999)
+plot(SQ3_posthoc , las=1 , col="brown")
+# Apply the function on my dataset
+LABELS <- generate_label_df(SQ3_posthoc, "GH_Plot_SQ3$source")
+my_colors <- rainbow_hcl(5)
+
+
+# Draw the basic boxplot
+pdf(here("analysis/figures/GH_Soil_Map/GH_Plot_SQ3_boxplot.pdf"), width = 6.5, height = 4.5)
+a <- boxplot(GH_Plot_SQ3$SQ3 ~ GH_Plot_SQ3$source , ylim=c(0,100), col=my_colors[as.numeric(LABELS[,3])] , ylab="SQ3" , xlab="Soil Map" ,main="Maize Soil Suitability")
+dev.off()
+
+GH_Plot_SQ3 <- GH_Plot_SQ3 %>% rowwise() %>% dplyr::mutate(SQ3_SC = S_Class(SQ3))
+GH_Plot_SQ3$SQ3_SC <- factor(GH_Plot_SQ3$SQ3_SC, order = TRUE, levels = c("N", "S4", "S3", "S2", "S1", "S0"))
+
+
+col_bl <- c("#4575b4","#91bfdb", "#e0f3f8", "#fee090", "#fc8d59", "#d73027")
+agg_SQ3 <- count(GH_Plot_SQ3 %>% ungroup() %>% dplyr::filter(source != "SG1") %>% dplyr::group_by(source), SQ3_SC)  
+pdf(here("analysis/figures/GH_Soil_Map/GH_Plot_SQ3_barplot.pdf"), width = 6.5, height = 4.5)
+ ggplot(agg_SQ3) +
+      geom_col(aes(x = source, y = n, fill = forcats::fct_rev(SQ3_SC))) +
+      scale_fill_manual(values = col_bl)
+
+dev.off() 
+
+
+# SQ7
+GH_Plot_SQ7 <- GH_Plot_AEZ_Map_Compare.df %>% dplyr::select(id, Input_Level=`Input Level`, SQ7, source=data_source) %>% dplyr::filter(source!='SG1')
+GH_Plot_SQ7 <- GH_Plot_SQ7 %>%  dplyr::mutate(source = case_when(source == 'LPKS' ~ 'LPKS',
+                           source == 'HWSD' ~ 'HWSD',
+                           source == 'WISE' ~ 'WISE',
+                           source == 'ISDA' ~ 'ISDA',
+                           TRUE ~ 'SG')) %>% ungroup()
+
+GH_Plot_SQ7$source <- factor(GH_Plot_SQ7$source, levels = c('LPKS', 'SG', 'HWSD', 'WISE', 'ISDA'))
+GH_Plot_SQ7 %>% dplyr::group_by(source) %>% dplyr::summarize(mean(SQ7, na.rm=T), sd(SQ7, na.rm=T))
+SQ7_aov <- aov(GH_Plot_SQ7$SQ7 ~ GH_Plot_SQ7$source)
+SQ7_posthoc <- TukeyHSD(x=SQ7_aov, 'GH_Plot_SQ7$source', conf.level=0.99999)
+plot(SQ7_posthoc , las=1 , col="brown")
+# Apply the function on my dataset
+LABELS <- generate_label_df(SQ7_posthoc, "GH_Plot_SQ7$source")
+my_colors <- rainbow_hcl(5)
+
+
+# Draw the basic boxplot
+pdf(here("analysis/figures/GH_Soil_Map/GH_Plot_SQ7_boxplot.pdf"), width = 6.5, height = 4.5)
+a <- boxplot(GH_Plot_SQ7$SQ7 ~ GH_Plot_SQ7$source , ylim=c(0,100), col=my_colors[as.numeric(LABELS[,3])] , ylab="SQ7" , xlab="Soil Map" ,main="Maize Soil Suitability")
+dev.off()
+
+GH_Plot_SQ7 <- GH_Plot_SQ7 %>% rowwise() %>% dplyr::mutate(SQ7_SC = S_Class(SQ7))
+GH_Plot_SQ7$SQ7_SC <- factor(GH_Plot_SQ7$SQ7_SC, order = TRUE, levels = c("N", "S4", "S3", "S2", "S1", "S0"))
+
+
+col_bl <- c("#4575b4","#91bfdb", "#e0f3f8", "#fee090", "#fc8d59", "#d73027")
+agg_SQ7 <- count(GH_Plot_SQ7 %>% ungroup() %>% dplyr::filter(source != "SG1") %>% dplyr::group_by(source), SQ7_SC)  
+pdf(here("analysis/figures/GH_Soil_Map/GH_Plot_SQ7_barplot.pdf"), width = 6.5, height = 4.5)
+  ggplot(agg_SQ7) +
+      geom_col(aes(x = source, y = n, fill = forcats::fct_rev(SQ7_SC))) +
+      scale_fill_manual(values = col_bl)
+
+dev.off()
+
+```
+
+
+
+## High Input scenario
+```{r}
+
+GH_profile_list <- unique(LPKS_Soil_Map_Data$id)
+
+GH_AEZ_Map_Compare_High_list <- list()
+n <- length(GH_profile_list)
+pb <- txtProgressBar(min = 1, max = n, style=3)
+
+stime <- system.time({ 
+GH_AEZ_Map_Compare_High_list <- foreach(i=1:length(GH_profile_list), .packages = c("sf", "purrr", "stringr", "dplyr", "tidyr", "reticulate")) %do% { 
+  setTxtProgressBar(pb, i)
+  tryCatch({
+    lpks <- LPKS_Soil_Map_Data %>% dplyr::filter(id==GH_profile_list[i]) %>% dplyr::select(id, bedrock_depth = bedrock, bottom, texture, rfv) %>% dplyr::mutate(bedrock_depth = bedrock_depth %>% as.numeric() %>% tidyr::replace_na(NaN)) 
+    sg <- LPKS_Soil_Map_Data %>% dplyr::filter(id==GH_profile_list[i]) %>% dplyr::select(id, bedrock_depth=bedrock_sg, bottom, texture=texture_sg, rfv=rfv_sg) %>% dplyr::mutate(bedrock_depth = bedrock_depth %>% as.numeric() %>% tidyr::replace_na(NaN)) 
+    hwsd <- LPKS_Soil_Map_Data %>% dplyr::filter(id==GH_profile_list[i]) %>% dplyr::select(id, bedrock_depth=bedrock_hwsd, bottom, texture=texture_hwsd, rfv=rfv_hwsd) %>% dplyr::mutate(bedrock_depth = bedrock_depth %>% as.numeric() %>% tidyr::replace_na(NaN)) 
+    wise <- LPKS_Soil_Map_Data %>% dplyr::filter(id==GH_profile_list[i]) %>% dplyr::select(id, bedrock_depth=bedrock_wise, bottom, texture=texture_wise, rfv=rfv_wise) %>% dplyr::mutate(bedrock_depth = bedrock_depth %>% as.numeric() %>% tidyr::replace_na(NaN)) 
+    isda <- LPKS_Soil_Map_Data %>% dplyr::filter(id==GH_profile_list[i]) %>% dplyr::select(id, bedrock_depth=bedrock_isda, bottom, texture=texture_isda, rfv=rfv_isda) %>% dplyr::mutate(bedrock_depth = bedrock_depth %>% as.numeric() %>% tidyr::replace_na(NaN)) 
+    reticulate::source_python("C:/R_Drive/Data_Files/LPKS_Data/R_Projects/SoilID/code/GAEZ_Func_Profile_Comp.py")
+    Prof1 <- func_prof_comp_GAEZ_SQI(data=lpks, CROP_ID='4', inputLevel='H', depthWt_type=1) %>% dplyr::mutate(data_source=c("LPKS"))
+    Prof2 <- func_prof_comp_GAEZ_SQI(data=sg, CROP_ID='4', inputLevel='H', depthWt_type=1) %>% dplyr::mutate(data_source="SG")
+    Prof3 <- func_prof_comp_GAEZ_SQI(data=hwsd, CROP_ID='4', inputLevel='H', depthWt_type=1) %>% dplyr::mutate(data_source="HWSD")
+    Prof4 <- func_prof_comp_GAEZ_SQI(data=wise, CROP_ID='4', inputLevel='H', depthWt_type=1) %>% dplyr::mutate(data_source="WISE")
+    Prof5 <- func_prof_comp_GAEZ_SQI(data=isda, CROP_ID='4', inputLevel='H', depthWt_type=1) %>% dplyr::mutate(data_source="ISDA")
+    prof_all <-rbind(Prof1,Prof2,Prof3,Prof4,Prof5)
+    GH_AEZ_Map_Compare_High_list[i] <- prof_all
+  }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+close(pb)
+})[3]
+stime
+
+GH_AEZ_Map_Compare_High.df <- bind_rows(GH_AEZ_Map_Compare_High_list)
+
+GH_AEZ_Map_Compare_High.df <- GH_AEZ_Map_Compare_High.df %>% rowwise() %>% dplyr::mutate(SC = S_Class(SR)) %>% ungroup()
+GH_AEZ_Map_Compare_High.df$SC <- factor(GH_AEZ_Map_Compare_High.df$SC, order = TRUE, levels = c("N", "S4", "S3", "S2", "S1", "S0"))
+
+
+##### SR
+GH_High_SR <- GH_AEZ_Map_Compare.df %>% dplyr::select(id, Input_Level=`Input Level`, SR, source=data_source)
+GH_High_SR <- GH_High_SR %>%  dplyr::mutate(source = case_when(source == 'LPKS' ~ 'LPKS',
+                           source == 'HWSD' ~ 'HWSD',
+                           source == 'WISE' ~ 'WISE',
+                           source == 'ISDA' ~ 'ISDA',
+                           TRUE ~ 'SG')) %>% ungroup()
+
+GH_High_SR$source <- factor(GH_High_SR$source, levels = c('LPKS', 'SG', 'HWSD', 'WISE', 'ISDA'))
+GH_High_SR %>% dplyr::group_by(source) %>% dplyr::summarize(mean(SR, na.rm=T), sd(SR, na.rm=T))
+SR_aov <- aov(GH_High_SR$SR ~ GH_High_SR$source)
+SR_posthoc <- TukeyHSD(x=SR_aov, 'GH_High_SR$source', conf.level=0.99999)
+plot(SR_posthoc , las=1 , col="brown")
+
+# Apply the function on my dataset
+LABELS <- generate_label_df(SR_posthoc, "GH_High_SR$source")
+my_colors <- rainbow_hcl(5)
+
+
+# Draw the basic boxplot
+pdf(here("analysis/figures/GH_Soil_Map/GH_High_SR_boxplot.pdf"), width = 6.5, height = 4.5)
+boxplot(GH_High_SR$SR ~ GH_High_SR$source , ylim=c(0,100), col=my_colors[as.numeric(LABELS[,3])] , ylab="Soil Suitability" , xlab="Soil Map" ,main="Maize Soil Suitability")
+dev.off()
+
+col_bl <- c("#4575b4","#91bfdb", "#e0f3f8", "#fee090", "#fc8d59", "#d73027")
+agg <- count(GH_AEZ_Map_Compare.df %>% ungroup()  %>% dplyr::group_by(data_source), SC)  
+pdf(here("analysis/figures/GH_Soil_Map/GH_High_AEZ_barplot.pdf"), width = 6.5, height = 4.5)
+  ggplot(agg) +
+      geom_col(aes(x = data_source, y = n, fill = forcats::fct_rev(SC))) +
+      scale_fill_manual(values = col_bl)
+
+dev.off() 
+
+# SQ1
+GH_High_SQ1 <- GH_AEZ_Map_Compare.df %>% dplyr::select(id, Input_Level=`Input Level`, SQ1, source=data_source) %>% dplyr::filter(source!='SG1')
+GH_High_SQ1 <- GH_High_SQ1 %>%  dplyr::mutate(source = case_when(source == 'LPKS' ~ 'LPKS',
+                           source == 'HWSD' ~ 'HWSD',
+                           source == 'WISE' ~ 'WISE',
+                           source == 'ISDA' ~ 'ISDA',
+                           TRUE ~ 'SG')) %>% ungroup()
+
+GH_High_SQ1$source <- factor(GH_High_SQ1$source, levels = c('LPKS', 'SG', 'HWSD', 'WISE', 'ISDA'))
+GH_High_SQ1 %>% dplyr::group_by(source) %>% dplyr::summarize(mean(SQ1, na.rm=T), sd(SQ1, na.rm=T))
+SQ1_aov <- aov(GH_High_SQ1$SQ1 ~ GH_High_SQ1$source)
+SQ1_posthoc <- TukeyHSD(x=SQ1_aov, 'GH_High_SQ1$source', conf.level=0.99999)
+plot(SQ1_posthoc , las=1 , col="brown")
+# Apply the function on my dataset
+LABELS <- generate_label_df(SQ1_posthoc, "GH_High_SQ1$source")
+my_colors <- rainbow_hcl(5)
+
+
+# Draw the basic boxplot
+pdf(here("analysis/figures/GH_Soil_Map/GH_High_SQ1_boxplot.pdf"), width = 6.5, height = 4.5)
+boxplot(GH_High_SQ1$SQ1 ~ GH_High_SQ1$source , ylim=c(0,100), col=my_colors[as.numeric(LABELS[,3])] , ylab="SQ1" , xlab="Soil Map" ,main="Maize Soil Suitability")
+dev.off()
+
+GH_High_SQ1 <- GH_High_SQ1 %>% rowwise() %>% dplyr::mutate(SQ1_SC = S_Class(SQ1))
+GH_High_SQ1$SQ1_SC <- factor(GH_High_SQ1$SQ1_SC, order = TRUE, levels = c("N", "S4", "S3", "S2", "S1", "S0"))
+
+
+col_bl <- c("#4575b4","#91bfdb", "#e0f3f8", "#fee090", "#fc8d59", "#d73027")
+agg_SQ1 <- count(GH_High_SQ1 %>% ungroup() %>% dplyr::group_by(source), SQ1_SC)  
+pdf(here("analysis/figures/GH_Soil_Map/GH_High_SQ1_barplot.pdf"), width = 6.5, height = 4.5)
+  ggplot(agg_SQ1) +
+      geom_col(aes(x = source, y = n, fill = forcats::fct_rev(SQ1_SC))) +
+      scale_fill_manual(values = col_bl)
+  
+dev.off() 
+
+
+# SQ3
+GH_High_SQ3 <- GH_AEZ_Map_Compare.df %>% dplyr::select(id, Input_Level=`Input Level`, SQ3, source=data_source) %>% dplyr::filter(source!='SG1')
+GH_High_SQ3 <- GH_High_SQ3 %>%  dplyr::mutate(source = case_when(source == 'LPKS' ~ 'LPKS',
+                           source == 'HWSD' ~ 'HWSD',
+                           source == 'WISE' ~ 'WISE',
+                           source == 'ISDA' ~ 'ISDA',
+                           TRUE ~ 'SG')) %>% ungroup()
+
+GH_High_SQ3$source <- factor(GH_High_SQ3$source, levels = c('LPKS', 'SG', 'HWSD', 'WISE', 'ISDA'))
+GH_High_SQ3 %>% dplyr::group_by(source) %>% dplyr::summarize(mean(SQ3, na.rm=T), sd(SQ3, na.rm=T))
+SQ3_aov <- aov(GH_High_SQ3$SQ3 ~ GH_High_SQ3$source)
+SQ3_posthoc <- TukeyHSD(x=SQ3_aov, 'GH_High_SQ3$source', conf.level=0.99999)
+plot(SQ3_posthoc , las=1 , col="brown")
+# Apply the function on my dataset
+LABELS <- generate_label_df(SQ3_posthoc, "GH_High_SQ3$source")
+my_colors <- rainbow_hcl(5)
+
+
+# Draw the basic boxplot
+pdf(here("analysis/figures/GH_Soil_Map/GH_High_SQ3_boxplot.pdf"), width = 6.5, height = 4.5)
+boxplot(GH_High_SQ3$SQ3 ~ GH_High_SQ3$source , ylim=c(0,100), col=my_colors[as.numeric(LABELS[,3])] , ylab="SQ3" , xlab="Soil Map" ,main="Maize Soil Suitability")
+dev.off()
+
+GH_High_SQ3 <- GH_High_SQ3 %>% rowwise() %>% dplyr::mutate(SQ3_SC = S_Class(SQ3))
+GH_High_SQ3$SQ3_SC <- factor(GH_High_SQ3$SQ3_SC, order = TRUE, levels = c("N", "S4", "S3", "S2", "S1", "S0"))
+
+
+col_bl <- c("#4575b4","#91bfdb", "#e0f3f8", "#fee090", "#fc8d59", "#d73027")
+agg_SQ3 <- count(GH_High_SQ3 %>% ungroup() %>% dplyr::group_by(source), SQ3_SC)  
+pdf(here("analysis/figures/GH_Soil_Map/GH_High_SQ3_barplot.pdf"), width = 6.5, height = 4.5)
+ ggplot(agg_SQ3) +
+      geom_col(aes(x = source, y = n, fill = forcats::fct_rev(SQ3_SC))) +
+      scale_fill_manual(values = col_bl)
+
+dev.off() 
+
+
+# SQ7
+GH_High_SQ7 <- GH_AEZ_Map_Compare.df %>% dplyr::select(id, Input_Level=`Input Level`, SQ7, source=data_source) %>% dplyr::filter(source!='SG1')
+GH_High_SQ7 <- GH_High_SQ7 %>%  dplyr::mutate(source = case_when(source == 'LPKS' ~ 'LPKS',
+                           source == 'HWSD' ~ 'HWSD',
+                           source == 'WISE' ~ 'WISE',
+                           source == 'ISDA' ~ 'ISDA',
+                           TRUE ~ 'SG')) %>% ungroup()
+
+GH_High_SQ7$source <- factor(GH_High_SQ7$source, levels = c('LPKS', 'SG', 'HWSD', 'WISE', 'ISDA'))
+GH_High_SQ7 %>% dplyr::group_by(source) %>% dplyr::summarize(mean(SQ7, na.rm=T), sd(SQ7, na.rm=T))
+SQ7_aov <- aov(GH_High_SQ7$SQ7 ~ GH_High_SQ7$source)
+SQ7_posthoc <- TukeyHSD(x=SQ7_aov, 'GH_High_SQ7$source', conf.level=0.99999)
+plot(SQ7_posthoc , las=1 , col="brown")
+# Apply the function on my dataset
+LABELS <- generate_label_df(SQ7_posthoc, "GH_High_SQ7$source")
+my_colors <- rainbow_hcl(5)
+
+
+# Draw the basic boxplot
+pdf(here("analysis/figures/GH_Soil_Map/GH_High_SQ7_boxplot.pdf"), width = 6.5, height = 4.5)
+boxplot(GH_High_SQ7$SQ7 ~ GH_High_SQ7$source , ylim=c(0,100), col=my_colors[as.numeric(LABELS[,3])] , ylab="SQ7" , xlab="Soil Map" ,main="Maize Soil Suitability")
+dev.off()
+
+GH_High_SQ7 <- GH_High_SQ7 %>% rowwise() %>% dplyr::mutate(SQ7_SC = S_Class(SQ7))
+GH_High_SQ7$SQ7_SC <- factor(GH_High_SQ7$SQ7_SC, order = TRUE, levels = c("N", "S4", "S3", "S2", "S1", "S0"))
+
+
+col_bl <- c("#4575b4","#91bfdb", "#e0f3f8", "#fee090", "#fc8d59", "#d73027")
+agg_SQ7 <- count(GH_High_SQ7 %>% ungroup() %>% dplyr::group_by(source), SQ7_SC)  
+pdf(here("analysis/figures/GH_Soil_Map/GH_High_SQ7_barplot.pdf"), width = 6.5, height = 4.5)
+  ggplot(agg_SQ7) +
+      geom_col(aes(x = source, y = n, fill = forcats::fct_rev(SQ7_SC))) +
+      scale_fill_manual(values = col_bl)
+
+dev.off()
+```
+
+# -----------------------------------------------------------------------------------------------------------------------------
+# Plotting plot level analysis
+## Plotting polygon and points relative to farm field
+```{r}
+# select farm location
+i=20
+farm <- EPA_Farm_Location %>% dplyr::filter(Farm==EPA_LPKS_Farms[i]) %>% dplyr::select(longitude, latitude) %>% as.matrix()
+farm_points <- SpatialPoints(farm, proj4string = CRS('+proj=longlat +datum=WGS84'))
+farm_points <- st_as_sf(farm_points)
+farm_points <- sf::st_transform(farm_points, "+init=epsg:32630")
+farm_poly_sub <- farm_poly[i, "ID"]
+m <- mapview(farm_poly_sub, map.types=c("Esri.WorldImagery", "OpenTopoMap"), layer.name = 'Field Sampling Area', color="red", lwd=3, alpha.regions=0.0, col.regions="red") +
+mapview(farm_points, map.types=c("Esri.WorldImagery", "OpenTopoMap"),  alpha.regions=0.5, layer.name = 'Soil Profiles', legend=F) 
+
+centroid <- st_centroid(farm_poly_sub) %>% as_Spatial() %>% spTransform(CRS('+proj=longlat +datum=WGS84')) %>% coordinates()
+
+m@map <- m@map %>% leaflet::setView(centroid[1], centroid[2], zoom = 17)
+m
+
+
+r <- raster(farm_poly_sub, res = 10)
+r_poly <- rasterize(farm_poly_sub, r)
+p <- rasterToPoints(r_poly)
+p<- p %>% as.data.frame()
+points <- st_as_sf(p, coords = c("x", "y"), crs = "+init=epsg:32630")
+  
+m <- addFeatures(map = m, data = st_transform(points, '+proj=longlat +datum=WGS84'), color='yellow', fill=TRUE, weight=3)  
+
+buffer <- st_buffer(LPKS_Ghana_Soil.sf%>% filter(id==23910), 250)
+plot(buffer)
+
+buffer_clay <- raster::crop(sg2_clay_brick, buffer)
+  
+point <- st_as_sf(centroid %>% as.data.frame(), coords = c("coords.x1", "coords.x2"), crs = "+proj=longlat +datum=WGS84") %>% st_transform(crs='+proj=igh +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs')
+
+#SG
+point <- LPKS_Ghana_Soil.sf%>% filter(id==21630) %>% st_transform(crs='+proj=igh +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs')
+buffer <- st_buffer(point, 250)
+buffer_clay <- raster::crop(sg2_clay_brick, st_transform(buffer, crs='+proj=igh +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs'), snap='out') 
+plot(buffer_clay[[1]])
+plot(st_geometry(buffer), add=T)
+#plot(st_geometry(point), add=T)
+plot(st_geometry(LPKS_Ghana_Soil.sf %>% st_transform(crs='+proj=igh +lon_0=0 +x_0=0 +y_0=0 +datum=WGS84 +units=m +no_defs')), add=T)
+
+
+point <- st_as_sf(centroid %>% as.data.frame(), coords = c("coords.x1", "coords.x2"), crs = "+proj=longlat +datum=WGS84") %>% st_transform(crs='+proj=merc +a=6378137 +b=6378137 +lat_ts=0 +lon_0=0 +x_0=0 +y_0=0 +k=1 +units=m +nadgrids=@null +wktext +no_defs')
+#ISDA
+point <- LPKS_Ghana_Soil.sf%>% filter(id==21630) %>% st_transform(crs='+proj=merc +a=6378137 +b=6378137 +lat_ts=0 +lon_0=0 +x_0=0 +y_0=0 +k=1 +units=m +nadgrids=@null +wktext +no_defs')
+buffer <- st_buffer(point, 250)
+buffer_clay <- raster::crop(isda_clay[[2]], buffer, snap='out')
+plot(buffer_clay)
+plot(st_geometry(buffer), add=T)
+#plot(st_geometry(point), add=T)
+plot(st_geometry(LPKS_Ghana_Soil.sf %>% st_transform(crs='+proj=merc +a=6378137 +b=6378137 +lat_ts=0 +lon_0=0 +x_0=0 +y_0=0 +k=1 +units=m +nadgrids=@null +wktext +no_defs')), add=T)
+test <- raster::extract(isda_clay[[2]], buffer)
+
+
+pdf(here("analysis/figures/isda_map_clay_points.pdf"), width = 6, height = 6)
+plot(buffer_clay)
+plot(st_geometry(buffer), add=T)
+#plot(st_geometry(point), add=T)
+plot(st_geometry(LPKS_Ghana_Soil.sf %>% st_transform(crs='+proj=merc +a=6378137 +b=6378137 +lat_ts=0 +lon_0=0 +x_0=0 +y_0=0 +k=1 +units=m +nadgrids=@null +wktext +no_defs')), add=T)
+dev.off()
+
+```
+
+
+# Data image not included in repository
+```{r}
+#save.image(here::here('data/LPKS_Ghana_Soil_Map_Accuracy.RData'))
+#load(here::here('data/LPKS_Ghana_Soil_Map_Accuracy.RData'))
+```
+

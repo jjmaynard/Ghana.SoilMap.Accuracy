@@ -1,0 +1,807 @@
+---
+title: "Ghana Soil Map Comparison"
+output: html_notebook
+---
+
+```{r message=FALSE, warning=FALSE}
+#set libary path
+required.packages <- c("sf", "readr", "dplyr", "tidyr", "purrr", "reticulate", "Rcpp", "foreach", "stringr", "tcltk", "utils", "iterators", "httr", "jsonlite", "doParallel", "here", "raster", "aqp", "GSIF","XML", "rgdal","gdalUtils", "viridis", "rasterVis")
+new.packages <- required.packages[!(required.packages %in% installed.packages()[, 
+    "Package"])]
+if (length(new.packages)) install.packages(new.packages)
+lapply(required.packages, require, character.only = T)
+rm(required.packages, new.packages)
+
+
+no_cores <- detectCores() - 1  
+cl <- makeCluster(no_cores, type="SOCK", outfile = "")  
+registerDoParallel(cl)  
+getDoParWorkers()
+#options(stringsAsFactors = FALSE)
+#stopCluster(cl)
+```
+
+```{r}
+getCF_class <- function(cf){
+    if(is.na(cf)){
+        cf_g <-  NA
+    }else if(cf >= 0 & cf < 2){
+        cf_g <-  "0-1%"
+    }else if( cf >=2 & cf < 16){
+        cf_g <-  "1-15%"
+    }else if(cf >= 16 & cf < 36){
+        cf_g <-  "15-35%"
+    }else if(cf >= 36 & cf < 61){
+        cf_g <-  "35-60%"
+    }else if(cf >= 61 & cf <= 100){
+        cf_g <-  ">60%"
+    }
+    return(cf_g)
+}
+
+getCF_fromClass <- function(cf_class){
+    if(is.na(cf_class) | cf_class==""){
+        cf <-  NA
+    }else if(cf_class == "0-1%"){
+        cf <-  1
+    }else if(cf_class == "1-15%"){
+        cf <- 9.5 
+    }else if(cf_class == "15-35%"){
+        cf <- 26 
+    }else if(cf_class == "35-60%"){
+        cf <-  48.5
+    }else if(cf_class == ">60%"){
+        cf <- 80.5
+    }
+    return(cf)
+}
+
+getCF_rep <- function(cf){
+    if(is.na(cf)){
+        cf <-  NA
+    }else if(cf >=0 & cf < 2){
+        cf <-  1
+    }else if(cf >=2 & cf < 16){
+        cf <-  9.5
+    }else if(cf >= 16 & cf < 36){
+        cf <-  26
+    }else if(cf >= 36 & cf < 61){
+        cf <-  48.5
+    }else if(cf >= 61 & cf <= 100){
+        cf <-  80.5
+    }
+}
+
+
+getSand <- function(texture){
+        if(is.na(texture) | texture==""){
+          sand <- NA
+        }else{
+            txt_l <- stringr::str_to_lower(texture)
+            if(txt_l == "sand"){
+                sand <- 92.0
+            }else if(txt_l == "loamy sand"){
+                sand <- 80.0
+            }else if(txt_l == "sandy loam"){
+                sand <- 61.5
+            }else if(txt_l == "sandy clay loam"){
+                sand <- 62.5
+            }else if(txt_l == "loam"){
+                sand <- 37.5
+            }else if(txt_l == "silt"){
+                sand <- 10.0
+            }else if(txt_l == "silt loam"){
+                sand <- 25.0
+            }else if(txt_l == "silty clay loam"){
+                sand <- 10.0
+            }else if( txt_l == "clay loam"){
+                sand <- 32.5
+            }else if(txt_l == "sandy clay"){
+                sand <- 55.0
+            }else if(txt_l == "silty clay"){
+                sand <- 10.0
+            }else if(txt_l == "clay"){
+                sand <- 22.5
+            }}
+        return(sand)
+}
+            
+getClay <- function(texture){
+        if(is.na(texture) | texture==""){
+          clay <- NA
+        }else{
+            txt_l <- stringr::str_to_lower(texture)
+            if(txt_l == "sand"){
+                clay <- 5.0
+            }else if(txt_l == "loamy sand"){
+                clay <- 7.5
+            }else if(txt_l == "sandy loam"){
+                clay <- 10.0
+            }else if(txt_l == "sandy clay loam"){
+                clay <- 27.5
+            }else if(txt_l == "loam"){
+                clay <- 17.0
+            }else if(txt_l == "silt"){
+                clay <- 6.0
+            }else if(txt_l == "silt loam"){
+                clay <- 13.5
+            }else if(txt_l == "silty clay loam"){
+                clay <- 33.5
+            }else if( txt_l == "clay loam"){
+                clay <- 33.5
+            }else if(txt_l == "sandy clay"){
+                clay <- 45.0
+            }else if(txt_l == "silty clay"){
+                clay <- 50.0
+            }else if(txt_l == "clay"){
+                clay <- 70.0
+            }}
+        return(clay)
+}
+
+gettt <- function(sand, silt, clay){
+        if(is.na(sand) | is.na(silt) | is.na(clay)){
+            x = NA
+        } else if(sand==0 & silt==0 & clay==0){
+            x = NA
+        } else if((silt + 1.5 * clay) < 15){
+            x = "Sand"
+        } else if((silt + 1.5 * clay) >= 15 & (silt + 2.0 * clay) < 30){
+            x = "Loamy sand"
+        } else if((clay >= 7) & (clay <= 20) & (sand > 52) & ((silt + 2.0 * clay) >= 30)){
+            x = "Sandy loam"
+        } else if((clay < 7) & (silt < 50) & ((silt + 2.0 * clay) >= 30)){
+            x = "Sandy loam"
+        } else if((clay >= 7) & (clay <= 27) & (silt >= 28) & (silt < 50) & (sand <= 52)){
+            x = "Loam"
+        } else if(((silt >= 50) & (clay >= 12) & (clay < 27)) | ((silt >= 50) & (silt < 80) & (clay < 12))){
+            x = "Silt loam"
+        } else if((silt >= 80) & (clay < 12)){
+            x = "Silt"
+        } else if((clay >= 20) & (clay < 35) & (silt < 28) & (sand > 45)){
+            x = "Sandy clay loam"
+        } else if((clay >= 27) & (clay < 40) & (sand > 20) & (sand <= 45)){
+            x = "Clay loam"
+        } else if((clay >= 27) & (clay < 40) & (sand <= 20)){
+            x = "Silty clay loam"
+        } else if((clay >= 35) & (sand >= 45)){
+            x = "Sandy clay"
+        } else if((clay >= 40) & (silt >= 40)){
+            x = "Silty clay"
+        } else if((clay >= 40) & (sand <= 45) & (silt < 40)){
+            x = "Clay"
+        } else {
+            x = NA
+        }
+        return(x)
+}
+
+gettt_num <- function(sand, silt, clay){
+        if(is.na(sand) | is.na(silt) | is.na(clay)){
+            x = NA
+        } else if((silt==0 & clay==0 & sand==0)){
+            x = NA
+        } else if((silt + 1.5 * clay) < 15){
+            x = 12
+        } else if((silt + 1.5 * clay) >= 15 & (silt + 2.0 * clay) < 30){
+            x = 11
+        } else if((clay >= 7) & (clay <= 20) & (sand > 52) & ((silt + 2.0 * clay) >= 30)){
+            x = 9
+        } else if((clay < 7) & (silt < 50) & ((silt + 2.0 * clay) >= 30)){
+            x = 9
+        } else if((clay >= 7) & (clay <= 27) & (silt >= 28) & (silt < 50) & (sand <= 52)){
+            x = 7
+        } else if(((silt >= 50) & (clay >= 12) & (clay < 27)) | ((silt >= 50) & (silt < 80) & (clay < 12))){
+            x = 8
+        } else if((silt >= 80) & (clay < 12)){
+            x = 10
+        } else if((clay >= 20) & (clay < 35) & (silt < 28) & (sand > 45)){
+            x = 6
+        } else if((clay >= 27) & (clay < 40) & (sand > 20) & (sand <= 45)){
+            x = 4
+        } else if((clay >= 27) & (clay < 40) & (sand <= 20)){
+            x = 5
+        } else if((clay >= 35) & (sand >= 45)){
+            x = 3
+        } else if((clay >= 40) & (silt >= 40)){
+            x = 2
+        } else if((clay >= 40) & (sand <= 45) & (silt < 40)){
+            x = 1
+        } else {
+            x = NA
+        }
+        return(x)
+}
+
+
+
+mean_na <- function(x){
+  x_mean <- mean(x, na.rm=TRUE)
+  return(x_mean)
+}
+
+```
+
+```{r}
+ssa_countries <- read_sf(here('data/raw_data/Countries.shp'))
+ghana <- ssa_countries %>% dplyr::filter(COUNTRY=='Ghana')
+
+sg2_txt <- brick(here('data/raw_data/SoilGridsv2/SG2_texture_class_sl1_sl4.tif'))
+sg2_rfv <- brick(here('data/raw_data/SoilGridsv2/SG2_rfv_class_sl1_sl4.tif'))
+txt_isda <- brick(here('data/raw_data/ISDA_txt_ghana.tif')) 
+rfv_isda <- brick(here('data/raw_data/ISDA_rfv_ghana.tif'))
+```
+
+# SoilGrids V2 and ISDA  txt and rfv class frequencies
+```{r}
+##SoilGrids V2 Ghana txt and rfv class frequencies-------------------------------------------------
+#TXT
+sg2_txt_0_5_freq <- data.frame(freq(sg2_txt[[1]])) %>% purrr::set_names('value', 's1')
+sg2_txt_5_15_freq <- data.frame(freq(sg2_txt[[2]])) %>% purrr::set_names('value', 's2')
+sg2_txt_15_30_freq <- data.frame(freq(sg2_txt[[3]])) %>% purrr::set_names('value', 's3')
+sg2_txt_30_60_freq <- data.frame(freq(sg2_txt[[4]])) %>% purrr::set_names('value', 's4')
+
+sg2_txt_freq_sum <- merge(sg2_txt_0_5_freq, merge(sg2_txt_5_15_freq, merge(sg2_txt_15_30_freq,sg2_txt_30_60_freq, by='value', all=T), by='value', all=T), by='value', all=T)
+sg2_txt_freq_sum <- sg2_txt_freq_sum %>% rowwise() %>% dplyr::mutate(sum = sum(s1,s2,s3,s4, na.rm = T)) %>% ungroup()
+
+sg2_txt_tot <- sum(sg2_txt_freq_sum$sum)-7657252
+sg2_txt_freq_sum$prop <- sg2_txt_freq_sum$sum/sg2_txt_tot*100
+
+#RVF
+rfv_s1 <- data.frame(freq(sg2_rfv[[1]])) %>% purrr::set_names('value', 's1')
+rfv_s2 <- data.frame(freq(sg2_rfv[[2]])) %>% purrr::set_names('value', 's2')
+rfv_s3 <- data.frame(freq(sg2_rfv[[3]])) %>% purrr::set_names('value', 's3')
+rfv_s4 <- data.frame(freq(sg2_rfv[[4]])) %>% purrr::set_names('value', 's4')
+
+rfv_sum <- merge(rfv_s1, merge(rfv_s2, merge(rfv_s3,rfv_s4, by='value', all=T), by='value', all=T), by='value', all=T)
+rfv_sum <- rfv_sum %>% rowwise() %>% dplyr::mutate(sum = sum(s1,s2,s3,s4, na.rm = T)) %>% ungroup()
+rfv_sum <- rfv_sum %>% dplyr::mutate(rfv_class = if_else(value <=10, "0-1%", if_else(value >10 & value <=150, "1-15%", if_else(value >150 & value <=300, "15-30%", if_else(value >300 & value <=600, "30-60%", "60-100%")))))
+class_sum <- rfv_sum %>% dplyr::group_by(rfv_class) %>% dplyr::summarise(class_sum = sum(sum, na.rm = T))
+sg2_rfv_tot <- sum(class_sum$class_sum)-7147612
+class_sum$prop <- class_sum$class_sum/sg2_rfv_tot*100
+
+##-------------------------------------------------
+#ISDA texture class frequencies
+isda_txt_0_20_freq <- data.frame(freq(txt_isda[[1]])) %>% purrr::set_names('value', 's1')
+isda_txt_20_50_freq <- data.frame(freq(txt_isda[[2]])) %>% purrr::set_names('value', 's2')
+
+isda_txt_freq_sum <- merge(isda_txt_0_20_freq, isda_txt_20_50_freq, by='value', all=T)
+isda_txt_freq_sum <- isda_txt_freq_sum %>% rowwise() %>% dplyr::mutate(sum = sum(s1,s2, na.rm = T)) %>% ungroup()
+
+isda_txt_tot <- sum(isda_txt_freq_sum$sum)-265796492
+isda_txt_freq_sum$prop <- isda_txt_freq_sum$sum/isda_txt_tot*100
+
+
+#isda RVF
+isda_rfv_s1 <- data.frame(freq(rfv_isda[[1]])) %>% purrr::set_names('value', 's1')
+isda_rfv_s2 <- data.frame(freq(rfv_isda[[2]])) %>% purrr::set_names('value', 's2')
+
+
+isda_rfv_sum <- merge(isda_rfv_s1, isda_rfv_s2, by='value', all=T)
+isda_rfv_sum <- isda_rfv_sum %>% rowwise() %>% dplyr::mutate(sum = sum(s1,s2, na.rm = T)) %>% ungroup()
+isda_rfv_sum <- isda_rfv_sum %>% dplyr::mutate(rfv_class = if_else(value <=10, "0-1%", if_else(value >10 & value <=150, "1-15%", if_else(value >150 & value <=300, "15-30%", if_else(value >300 & value <=600, "30-60%", "60-100%")))))
+isda_class_sum <- isda_rfv_sum %>% dplyr::group_by(rfv_class) %>% dplyr::summarise(class_sum = sum(sum, na.rm = T))
+isda_rfv_tot <- sum(isda_class_sum$class_sum)-265796492
+isda_class_sum$prop <- isda_class_sum$class_sum/isda_rfv_tot*100
+
+
+
+
+```
+
+# Reaggregate raster layers based on LPKS depths
+```{r}
+
+sg2_sand <- brick(stack(here('data/raw_data/SoilGridsv2/SG2_Ghana_Sand_0-5_mean.tif'),here('data/raw_data/SoilGridsv2/SG2_Ghana_Sand_5-15_mean.tif'),here('data/raw_data/SoilGridsv2/SG2_Ghana_Sand_15-30_mean.tif'),here('data/raw_data/SoilGridsv2/SG2_Ghana_Sand_30-60_mean.tif')))
+
+sg2_silt <- brick(stack(here('data/raw_data/SoilGridsv2/SG2_Ghana_Silt_0-5_mean.tif'),here('data/raw_data/SoilGridsv2/SG2_Ghana_Silt_5-15_mean.tif'),here('data/raw_data/SoilGridsv2/SG2_Ghana_Silt_15-30_mean.tif'),here('data/raw_data/SoilGridsv2/SG2_Ghana_Silt_30-60_mean.tif')))
+
+sg2_clay <- brick(stack(here('data/raw_data/SoilGridsv2/SG2_Ghana_Clay_0-5_mean.tif'),here('data/raw_data/SoilGridsv2/SG2_Ghana_Clay_5-15_mean.tif'),here('data/raw_data/SoilGridsv2/SG2_Ghana_Clay_15-30_mean.tif'),here('data/raw_data/SoilGridsv2/SG2_Ghana_Clay_30-60_mean.tif')))
+
+sg2_rfv <- brick(stack(here('data/raw_data/SoilGridsv2/SG2_Ghana_RFV_0-5_mean.tif'),here('data/raw_data/SoilGridsv2/SG2_Ghana_RFV_5-15_mean.tif'),here('data/raw_data/SoilGridsv2/SG2_Ghana_RFV_15-30_mean.tif'),here('data/raw_data/SoilGridsv2/SG2_Ghana_RFV_30-60_mean.tif')))
+
+raster.lpks.depths.run <- function(x, filename, block_n, old_top, old_bottom, new_depths) { 
+  out <- brick(x, nl=(length(new_depths)-1), values=FALSE)
+  out <- writeStart(out, filename, format="GTiff", overwrite=TRUE)
+  bs <- blockSize(x, minblocks=block_n)
+  pb <- pbCreate(bs$n)
+  pb <- txtProgressBar(min = 1, max = bs$n, style=3)
+  todisk <- TRUE
+  for (i in 1:bs$n) {
+    v <- getValuesBlock(x, row=bs$row[i], nrows=bs$nrows[i] )
+    colnames(v) <- paste0("d",seq(1,length(old_top),1))
+    vv <-array(, dim=c(nrow(v),3))
+    v_df <- data.frame(v) %>% mutate(cell=1:nrow(v)) %>% pivot_longer(colnames(v)[1]:colnames(v)[length(old_top)], names_to = 'depth') %>% mutate(top = case_when(depth=='d1' ~ old_top[1], depth=='d2' ~ old_top[2], depth=='d3' ~ old_top[3],depth=='d4' ~ old_top[4],), bottom = case_when(depth=='d1' ~ old_bottom[1], depth=='d2' ~ old_bottom[2], depth=='d3' ~ old_bottom[3],depth=='d4' ~ old_bottom[4]))
+    depths(v_df) <- cell ~ top + bottom
+    v_df.slab.lpksD <- aqp::slab(v_df, fm = cell ~ value, slab.structure=new_depths, slab.fun=mean_na)
+    v_df.slab.lpksD <- v_df.slab.lpksD %>% dplyr::select(-c(contributing_fraction)) %>% spread(variable, value)
+    v_df.slab.lpksD[ is.na(v_df.slab.lpksD)] <- NA
+    v_df.slab.lpksD$cell <- as.numeric(v_df.slab.lpksD$cell) 
+    v_df.slab.lpksD <- v_df.slab.lpksD %>% arrange(cell, top)
+    seq_start = seq(1,nrow(v_df.slab.lpksD), 3)
+    seq_stop = seq(3, nrow(v_df.slab.lpksD), 3)
+    for(j in 1:nrow(v)){
+      vv[j,] <- v_df.slab.lpksD$value[seq_start[j]:seq_stop[j]]
+    }
+    out <- writeValues(out, vv, bs$row[i])
+    setTxtProgressBar(pb, i)
+  }
+  out <- writeStop(out)
+  return(out)
+  close(pb)
+}
+
+
+stime <- system.time({ 
+raster.lpks.depths.run(sg2_sand, filename= here('data/derived_data/SG2_Ghana_Sand_lpks_depths.tif'), block_n=500, old_top=c(0,5,15,30), old_bottom=c(5,15,30,60), new_depths=c(0,10,20,50))
+})[3]
+stime
+
+stime <- system.time({ 
+raster.lpks.depths.run(sg2_silt, filename= here('data/derived_data/SG2_Ghana_Silt_lpks_depths.tif'), block_n=500, old_top=c(0,5,15,30), old_bottom=c(5,15,30,60), new_depths=c(0,10,20,50))
+})[3]
+stime
+
+stime <- system.time({ 
+raster.lpks.depths.run(sg2_clay, filename= here('data/derived_data/SG2_Ghana_Clay_lpks_depths.tif'), block_n=500, old_top=c(0,5,15,30), old_bottom=c(5,15,30,60), new_depths=c(0,10,20,50))
+})[3]
+stime
+
+stime <- system.time({ 
+raster.lpks.depths.run(sg2_rfv, filename= here('data/derived_data/SG2_Ghana_rfv_lpks_depths.tif'), block_n=500, old_top=c(0,5,15,30), old_bottom=c(5,15,30,60), new_depths=c(0,10,20,50))
+})[3]
+stime
+
+SG2_Ghana_Clay_lpks_depths <- brick(here('data/derived_data/SG2_Ghana_Clay_lpks_depths.tif'))
+SG2_Ghana_Sand_lpks_depths <- brick(here('data/derived_data/SG2_Ghana_Sand_lpks_depths.tif'))
+SG2_Ghana_Silt_lpks_depths <- brick(here('data/derived_data/SG2_Ghana_Silt_lpks_depths.tif'))
+SG2_Ghana_rfv_lpks_depths <- brick(here('data/derived_data/SG2_Ghana_rfv_lpks_depths.tif'))
+
+SG2_d1 <- brick(stack(SG2_Ghana_Sand_lpks_depths[[1]],SG2_Ghana_Silt_lpks_depths[[1]],SG2_Ghana_Clay_lpks_depths[[1]]))
+SG2_d2 <- brick(stack(SG2_Ghana_Sand_lpks_depths[[2]],SG2_Ghana_Silt_lpks_depths[[2]],SG2_Ghana_Clay_lpks_depths[[2]]))
+SG2_d3 <- brick(stack(SG2_Ghana_Sand_lpks_depths[[3]],SG2_Ghana_Silt_lpks_depths[[3]],SG2_Ghana_Clay_lpks_depths[[3]]))
+
+
+# raster.lpks.txt.run <- function(x, filename) { 
+#   out <- brick(x, nl=1, values=FALSE)
+#   out <- writeStart(out, filename, format="GTiff", overwrite=TRUE)
+#   bs <- blockSize(x, minblocks=500)
+#   pb <- pbCreate(bs$n)
+#   pb <- txtProgressBar(min = 1, max = bs$n, style=3)
+#   todisk <- TRUE
+#   for (i in 1:bs$n) {
+#     v <- getValuesBlock(x, row=bs$row[i], nrows=bs$nrows[i] )
+#     v_df <- data.frame(v) %>% mutate(cell=1:nrow(v))
+#     names(v_df) <- c("sand", "silt", "clay", "cell")
+#     v_df <- v_df %>% rowwise() %>% dplyr::mutate(txt_num = gettt_num(round(sand*.1,1), round(silt*.1), round(clay*.1))) %>% ungroup()
+#     vv <- v_df %>% dplyr::select(txt_num) %>% as.matrix()
+#     out <- writeValues(out, vv, bs$row[i])
+#     setTxtProgressBar(pb, i)
+#   }
+#   out <- writeStop(out)
+#   return(out)
+#   close(pb)
+# }
+
+# functions to calculate texture class for each depth
+raster_texture_calc <- function(x, filename, fun) {
+  out <- brick(x, nl=1, values=FALSE)
+  out <- writeStart(out, filename, format='GTiff', overwrite=TRUE)
+  bs <- blockSize(x)
+  bs <- blockSize(x, minblocks=bs$n*20)
+  pb <- txtProgressBar(min = 1, max = bs$n, style=3)
+  todisk <- TRUE
+  for (i in 1:bs$n) {
+    v <- getValuesBlock(x, row=bs$row[i], nrows=bs$nrows[i] )
+    vv <- array(, dim=c(nrow(v),3))
+    vvv <- foreach.raster.process(v,vv, fun)
+    vvvv <- do.call("rbind", lapply(vvv, array))
+    out <- writeValues(out, vvvv, bs$row[i])
+    setTxtProgressBar(pb, i)
+  }
+  out <- writeStop(out)
+  return(out)
+  close(pb)
+}
+
+
+foreach.raster.process<-function(v, vv, fun){
+  vv <-foreach(i=1:nrow(v), .export = c('gettt_num')) %dopar% {   
+    vv[i,] <- apply(t(as.matrix(v[i,])), 1, fun)
+  }
+  
+}
+
+
+text_calc <- function(data){
+                      sand = data[[1]]
+                      silt = data[[2]]
+                      clay = data[[3]]
+                      factor=((sand*.1) + (silt*.1) + (clay*.1))/100
+                      sand = sand*0.1/factor
+                      silt = silt*0.1/factor
+                      clay = clay*0.1/factor
+                      texture_num = gettt_num(sand, silt, clay)
+                      return(texture_num)
+}
+
+
+raster.lpks.txt.run(SG2_d1, filename= here('data/derived_data/SG2_Ghana_txt_lpks_depths10.tif'))
+raster.lpks.txt.run(SG2_d2, filename= here('data/derived_data/SG2_Ghana_txt_lpks_depths20.tif'))
+raster.lpks.txt.run(SG2_d3, filename= here('data/derived_data/SG2_Ghana_txt_lpks_depths50.tif'))
+
+```
+
+# recalculate SG2 frequencies based on LPKS depths
+```{r}
+##SoilGrids V2 Ghana txt and rfv class frequencies-------------------------------------------------
+#TXT
+SG2_Ghana_txt_lpks_depths10 <- raster(here('data/derived_data/SG2_Ghana_txt_lpks_depths10.tif'))
+SG2_Ghana_txt_lpks_depths10_p  <-projectRaster(SG2_Ghana_txt_lpks_depths10, crs = '+proj=longlat +datum=WGS84 +no_defs', method = "ngb" )
+SG2_Ghana_txt_lpks_depths10_c <- crop(SG2_Ghana_txt_lpks_depths10_p, extent(ghana))
+SG2_Ghana_txt_lpks_depths10_m <- mask(SG2_Ghana_txt_lpks_depths10_c, ghana)
+
+SG2_Ghana_txt_lpks_depths20 <- raster(here('data/derived_data/SG2_Ghana_txt_lpks_depths20.tif'))
+SG2_Ghana_txt_lpks_depths20_p  <-projectRaster(SG2_Ghana_txt_lpks_depths20, crs = '+proj=longlat +datum=WGS84 +no_defs', method = "ngb" )
+SG2_Ghana_txt_lpks_depths20_c <- crop(SG2_Ghana_txt_lpks_depths20_p, extent(ghana))
+SG2_Ghana_txt_lpks_depths20_m <- mask(SG2_Ghana_txt_lpks_depths20_c, ghana)
+
+SG2_Ghana_txt_lpks_depths50 <- raster(here('data/derived_data/SG2_Ghana_txt_lpks_depths50.tif'))
+SG2_Ghana_txt_lpks_depths50_p  <-projectRaster(SG2_Ghana_txt_lpks_depths50, crs = '+proj=longlat +datum=WGS84 +no_defs', method = "ngb" )
+SG2_Ghana_txt_lpks_depths50_c <- crop(SG2_Ghana_txt_lpks_depths50_p, extent(ghana))
+SG2_Ghana_txt_lpks_depths50_m <- mask(SG2_Ghana_txt_lpks_depths50_c, ghana)
+
+
+sg2_txt_0_10_freq <- data.frame(freq(SG2_Ghana_txt_lpks_depths10_m)) %>% purrr::set_names('value', 's10')
+sg2_txt_10_20_freq <- data.frame(freq(SG2_Ghana_txt_lpks_depths20_m)) %>% purrr::set_names('value', 's20')
+sg2_txt_20_50_freq <- data.frame(freq(SG2_Ghana_txt_lpks_depths50_m)) %>% purrr::set_names('value', 's50')
+
+
+sg2_txt_freq_sum_lpks <- merge(sg2_txt_0_10_freq, merge(sg2_txt_10_20_freq, sg2_txt_20_50_freq, by='value', all=T), by='value', all=T)
+sg2_txt_freq_sum_lpks <- sg2_txt_freq_sum_lpks %>% rowwise() %>% dplyr::mutate(sum = sum(s10,s20,s50, na.rm = T)) %>% ungroup()
+
+sg2_txt_tot_lpks <- sum(sg2_txt_freq_sum_lpks$sum)-5827022
+sg2_txt_freq_sum_lpks$prop <- sg2_txt_freq_sum_lpks$sum/sg2_txt_tot_lpks*100
+
+#RVF
+SG2_Ghana_rfv_lpks_depths10 <- SG2_Ghana_rfv_lpks_depths[[1]]
+SG2_Ghana_rfv_lpks_depths10_p  <-projectRaster(SG2_Ghana_rfv_lpks_depths10, crs = '+proj=longlat +datum=WGS84 +no_defs', method = "ngb" )
+SG2_Ghana_rfv_lpks_depths10_c <- crop(SG2_Ghana_rfv_lpks_depths10_p, extent(ghana))
+SG2_Ghana_rfv_lpks_depths10_m <- mask(SG2_Ghana_rfv_lpks_depths10_c, ghana)
+
+SG2_Ghana_rfv_lpks_depths20 <- SG2_Ghana_rfv_lpks_depths[[2]]
+SG2_Ghana_rfv_lpks_depths20_p  <-projectRaster(SG2_Ghana_rfv_lpks_depths20, crs = '+proj=longlat +datum=WGS84 +no_defs', method = "ngb" )
+SG2_Ghana_rfv_lpks_depths20_c <- crop(SG2_Ghana_rfv_lpks_depths20_p, extent(ghana))
+SG2_Ghana_rfv_lpks_depths20_m <- mask(SG2_Ghana_rfv_lpks_depths20_c, ghana)
+
+SG2_Ghana_rfv_lpks_depths50 <- SG2_Ghana_rfv_lpks_depths[[3]]
+SG2_Ghana_rfv_lpks_depths50_p  <-projectRaster(SG2_Ghana_rfv_lpks_depths50, crs = '+proj=longlat +datum=WGS84 +no_defs', method = "ngb" )
+SG2_Ghana_rfv_lpks_depths50_c <- crop(SG2_Ghana_rfv_lpks_depths50_p, extent(ghana))
+SG2_Ghana_rfv_lpks_depths50_m <- mask(SG2_Ghana_rfv_lpks_depths50_c, ghana)
+
+SG2_Ghana_rfv_class_lpks10 <- data.frame(freq(SG2_Ghana_rfv_lpks_depths10_m)) %>% purrr::set_names('value', 's10') %>% dplyr::mutate(rfv_class = if_else(is.na(value), "NA", if_else(value <=10, "0-1%", if_else(value >10 & value <=150, "1-15%", if_else(value >150 & value <=300, "15-30%", if_else(value >300 & value <=600, "30-60%", "60-100%"))))))
+SG2_Ghana_rfv_class_lpks20 <- data.frame(freq(SG2_Ghana_rfv_lpks_depths20_m)) %>% purrr::set_names('value', 's20') %>% dplyr::mutate(rfv_class = if_else(is.na(value), "NA", if_else(value <=10, "0-1%", if_else(value >10 & value <=150, "1-15%", if_else(value >150 & value <=300, "15-30%", if_else(value >300 & value <=600, "30-60%", "60-100%"))))))
+SG2_Ghana_rfv_class_lpks50 <- data.frame(freq(SG2_Ghana_rfv_lpks_depths50_m)) %>% purrr::set_names('value', 's50') %>% dplyr::mutate(rfv_class = if_else(is.na(value), "NA", if_else(value <=10, "0-1%",if_else(value >10 & value <=150, "1-15%", if_else(value >150 & value <=300, "15-30%", if_else(value >300 & value <=600, "30-60%", "60-100%"))))))
+
+
+rfv_sum <- merge(SG2_Ghana_rfv_class_lpks10, merge(SG2_Ghana_rfv_class_lpks20, SG2_Ghana_rfv_class_lpks50, by='value', all=T), by='value', all=T)
+rfv_sum <- rfv_sum %>% rowwise() %>% dplyr::mutate(sum = sum(s10,s20,s50, na.rm = T)) %>% ungroup()
+sg2_rfv_class_sum <- rfv_sum %>% dplyr::group_by(rfv_class) %>% dplyr::summarise(class_sum = sum(sum, na.rm = T))
+sg2_rfv_tot <- sum(sg2_rfv_class_sum$class_sum)-5361422
+sg2_rfv_class_sum$prop <- sg2_rfv_class_sum$class_sum/sg2_rfv_tot*100
+
+```
+
+
+
+# Map Plotting
+```{r}
+#-----------SoilGrids-------------------------------------
+# Create texture class lookup table
+soilgrids_txt <- data.frame(c("Cl", "SiCl", "SaCl", "ClLo", "SiClLo", "SaClLo", "Lo", "SiLo", "SaLo", "Si", "LoSa", "Sa"),  
+c("Clay", "Silty clay", "Sandy clay", "Clay loam", "Silty clay loam", "Sandy clay loam", "Loam", "Silt loam", "Sandy loam", "Silt", "Loamy sand", "Sand"), seq(1:12)) %>% set_names("txt_abr", "txt_name", "txt_code")
+
+
+# Plotting surface texture
+#Viridis color palette
+soilgrids_txt <- soilgrids_txt %>% dplyr::mutate(col=viridis(12))
+#RBrewer color palette
+col_pal <- c('#67001f','#b2182b','#d6604d','#f4a582','#fddbc7','#f7f7f7','#d1e5f0','#92c5de','#4393c3','#40004b','#2166ac','#053061')
+soilgrids_txt <- soilgrids_txt %>% dplyr::mutate(col=col_pal)
+SG2_Ghana_txt_lpks_depths10_n <- ratify(SG2_Ghana_txt_lpks_depths10_m)
+SG2_Ghana_txt_lpks_depths10_n_rat <- levels(SG2_Ghana_txt_lpks_depths10_n)[[1]] #%>% dplyr::select(-c(col))
+SG2_Ghana_txt_lpks_depths10_n_rat <-  SG2_Ghana_txt_lpks_depths10_n_rat %>% left_join(soilgrids_txt, by=c('ID'= 'txt_code'))
+levels(SG2_Ghana_txt_lpks_depths10_n) <- SG2_Ghana_txt_lpks_depths10_n_rat
+
+sl1_myPal <- SG2_Ghana_txt_lpks_depths10_n_rat$col
+sl1_myTheme <- rasterTheme(region = sl1_myPal)
+
+pdf(here("analysis/figures/Ghana_SG2_0_10_txt_class.pdf"), width = 4.5, height = 6)
+rasterVis::levelplot(SG2_Ghana_txt_lpks_depths10_m, par.settings = sl1_myTheme) + latticeExtra::layer(sp.polygons(as_Spatial(ghana[1,3]), lwd=0.8, col='black'))
+dev.off()
+
+#-----------ISDA-------------------------------------
+# Plotting ISDA texture map of Ghana
+# Create texture class lookup table
+isda_txt <- data.frame(c("Cl", "SiCl", "SaCl", "ClLo", "SiClLo", "SaClLo", "Lo", "SiLo", "SaLo", "Si", "LoSa", "Sa"),  
+c("Clay", "Silty clay", "Sandy clay", "Clay loam", "Silty clay loam", "Sandy clay loam", "Loam", "Silt loam", "Sandy loam", "Silt", "Loamy sand", "Sand"), seq(1:12)) %>% set_names("txt_abr", "txt_name", "txt_code")
+isda_text_0_20 <- txt_isda[[1]]
+#Viridis color palette
+isda_txt <- isda_txt %>% dplyr::mutate(col=viridis(12))
+#RBrewer color palette
+col_pal <- c('#67001f','#b2182b','#d6604d','#f4a582','#fddbc7','#f7f7f7','#d1e5f0','#92c5de','#4393c3','#40004b','#2166ac','#053061')
+isda_txt <- isda_txt %>% dplyr::mutate(col=col_pal)
+isda_text_0_20 <- ratify(isda_text_0_20)
+isda_text_0_20_rat <- levels(isda_text_0_20)[[1]] %>% dplyr::select(-c(col))
+isda_text_0_20_rat <-  isda_text_0_20_rat %>% left_join(isda_txt, by=c('ID'= 'txt_code'))
+levels(isda_text_0_20) <- isda_text_0_20_rat
+isda_myPal <- isda_text_0_20_rat$col
+isda_myTheme <- rasterTheme(region = isda_myPal)
+
+pdf(here("analysis/figures/Ghana_ISDA_0_10_txt_class.pdf"), width = 4.5, height = 6)
+rasterVis::levelplot(isda_text_0_20, par.settings = isda_myTheme) + layer(sp.polygons(as_Spatial(ghana[1,3]), lwd=0.8, col='black'))
+dev.off()
+```
+
+
+
+```{r}
+Ghana_LPKS_Map_Compare_rev <- readRDS(here('data/Ghana_LPKS_Map_Compare_DF_rev.RDS'))
+```
+
+
+
+
+```{r}
+hwsd <- read_sf(here('data/HWSD_global_noWater_no_country.shp'))
+hwsd <- st_make_valid(hwsd)
+hwsd_ghana <- intersect(as_Spatial(hwsd), as_Spatial(ghana))
+hwsd_ghana <- st_as_sf(hwsd_ghana)
+hwsd_ghana$area <- st_area(hwsd_ghana) #Take care of units
+hwsd_ghana$area <- hwsd_ghana$area/1000000 
+hwsd_ghana <- hwsd_ghana %>% dplyr::group_by(area) %>% dplyr::mutate(poly_id = cur_group_id()) %>% ungroup()
+# hwsd_ghana <- hwsd_ghana %>% dplyr::rowwise() %>% dplyr::mutate(txt_top=gettt_num(T_SAND, T_SILT,T_CLAY)) %>% ungroup()
+# hwsd_ghana <- hwsd_ghana %>% dplyr::rowwise() %>% dplyr::mutate(txt_bot=gettt_num(S_SAND, S_SILT,S_CLAY)) %>% ungroup()
+hwsd_ghana_dom <- hwsd_ghana %>% dplyr::group_by(poly_id) %>% dplyr::filter(SHARE==max(SHARE)) %>% ungroup()
+
+
+hwsd_ghana_dom_sub_g <- hwsd_ghana_dom %>% dplyr::select(MU_GLOBAL, SHARE, id=COMPID, REF_DEPTH, T_GRAVEL, S_GRAVEL ) %>% st_drop_geometry()
+hwsd_ghana_dom_sub_g <- hwsd_ghana_dom_sub_g %>% pivot_longer(cols = T_GRAVEL:S_GRAVEL, names_to = c('GRAVEL')) %>% mutate(top = if_else(GRAVEL=='T_GRAVEL', 0, 30), bottom = if_else(GRAVEL=='T_GRAVEL', 30, 100)) %>% mutate(top = if_else(REF_DEPTH<=30 & GRAVEL == 'S_GRAVEL', -999, top)) %>% mutate(bottom = if_else(REF_DEPTH<=30 & GRAVEL == 'S_GRAVEL', -999, bottom)) %>% mutate(bottom = if_else(REF_DEPTH==10 & GRAVEL == 'T_GRAVEL', 10, bottom)) 
+hwsd_ghana_dom_sub_g <-hwsd_ghana_dom_sub_g %>% filter(bottom != -999)
+hwsd_ghana_dom_sub_g <- hwsd_ghana_dom_sub_g %>% dplyr::select(MU_GLOBAL, SHARE, id, top, bottom, rfv=value)
+
+hwsd_ghana_dom_sub_sa <- hwsd_ghana_dom %>% dplyr::select(MU_GLOBAL, SHARE,id=COMPID, REF_DEPTH, T_SAND, S_SAND) %>% st_drop_geometry()
+hwsd_ghana_dom_sub_sa <- hwsd_ghana_dom_sub_sa %>% pivot_longer(cols = T_SAND:S_SAND, names_to = c('SAND')) %>% mutate(top = if_else(SAND=='T_SAND', 0, 30), bottom = if_else(SAND=='T_SAND', 30, 100)) %>% mutate(top = if_else(REF_DEPTH<=30 & SAND == 'S_SAND', -999, top)) %>% mutate(bottom = if_else(REF_DEPTH<=30 & SAND == 'S_SAND', -999, bottom)) %>% mutate(bottom = if_else(REF_DEPTH==10 & SAND == 'T_SAND', 10, bottom)) 
+hwsd_ghana_dom_sub_sa <-hwsd_ghana_dom_sub_sa %>% filter(bottom != -999)
+hwsd_ghana_dom_sub_sa <- hwsd_ghana_dom_sub_sa %>% dplyr::select(MU_GLOBAL, SHARE, id, top, bottom, sand=value)
+
+hwsd_ghana_dom_sub_si <- hwsd_ghana_dom %>% dplyr::select(MU_GLOBAL, SHARE,id=COMPID, REF_DEPTH, T_SILT, S_SILT) %>% st_drop_geometry()
+hwsd_ghana_dom_sub_si <- hwsd_ghana_dom_sub_si %>% pivot_longer(cols = T_SILT:S_SILT, names_to = c('SILT')) %>% mutate(top = if_else(SILT=='T_SILT', 0, 30), bottom = if_else(SILT=='T_SILT', 30, 100)) %>% mutate(top = if_else(REF_DEPTH<=30 & SILT == 'S_SILT', -999, top)) %>% mutate(bottom = if_else(REF_DEPTH<=30 & SILT == 'S_SILT', -999, bottom)) %>% mutate(bottom = if_else(REF_DEPTH==10 & SILT == 'T_SILT', 10, bottom)) 
+hwsd_ghana_dom_sub_si <-hwsd_ghana_dom_sub_si %>% filter(bottom != -999)
+hwsd_ghana_dom_sub_si <- hwsd_ghana_dom_sub_si %>% dplyr::select(MU_GLOBAL, SHARE, id, top, bottom, silt=value)
+
+hwsd_ghana_dom_sub_cl <- hwsd_ghana_dom %>% dplyr::select(MU_GLOBAL, SHARE,id=COMPID, REF_DEPTH, T_CLAY, S_CLAY) %>% st_drop_geometry()
+hwsd_ghana_dom_sub_cl <- hwsd_ghana_dom_sub_cl %>% pivot_longer(cols = T_CLAY:S_CLAY, names_to = c('CLAY')) %>% mutate(top = if_else(CLAY=='T_CLAY', 0, 30), bottom = if_else(CLAY=='T_CLAY', 30, 100)) %>% mutate(top = if_else(REF_DEPTH<=30 & CLAY == 'S_CLAY', -999, top)) %>% mutate(bottom = if_else(REF_DEPTH<=30 & CLAY == 'S_CLAY', -999, bottom)) %>% mutate(bottom = if_else(REF_DEPTH==10 & CLAY == 'T_CLAY', 10, bottom)) 
+hwsd_ghana_dom_sub_cl <-hwsd_ghana_dom_sub_cl %>% filter(bottom != -999)
+hwsd_ghana_dom_sub_cl <- hwsd_ghana_dom_sub_cl %>% dplyr::select(MU_GLOBAL, SHARE, id, top, bottom, clay=value)
+  
+hwsd_ghana_dom_long <- hwsd_ghana_dom_sub_sa %>% left_join(hwsd_ghana_dom_sub_si, by=c('MU_GLOBAL'='MU_GLOBAL', 'SHARE' = 'SHARE', 'id' = 'id', 'top'='top', 'bottom'='bottom'))
+hwsd_ghana_dom_long <- hwsd_ghana_dom_long  %>% left_join(hwsd_ghana_dom_sub_cl, by=c('MU_GLOBAL'='MU_GLOBAL', 'SHARE' = 'SHARE', 'id' = 'id',  'top'='top', 'bottom'='bottom'))
+hwsd_ghana_dom_long <- hwsd_ghana_dom_long  %>% left_join(hwsd_ghana_dom_sub_g, by=c('MU_GLOBAL'='MU_GLOBAL', 'SHARE' = 'SHARE', 'id' = 'id',  'top'='top', 'bottom'='bottom'))
+
+
+depths(hwsd_ghana_dom_long) <- id ~ top + bottom
+hwsd_ghana_data_dom.slab.lpksD <- aqp::slab(hwsd_ghana_dom_long, fm = id ~ sand + silt + clay + rfv, slab.structure=c(0,10,20,50), slab.fun=mean_na)
+hwsd_ghana_data_dom.slab.lpksD <- hwsd_ghana_data_dom.slab.lpksD %>% dplyr::select(-c(contributing_fraction)) %>% spread(variable, value)
+hwsd_ghana_data_dom.slab.lpksD[ is.na(hwsd_ghana_data_dom.slab.lpksD) ] <- NA
+
+# correct for particle size class predictions so that sand+silt+clay=100
+hwsd_ghana_data_dom.slab.lpksD <- hwsd_ghana_data_dom.slab.lpksD %>% rowwise() %>% dplyr::mutate(sand_c = sand*(100/(sand+silt+clay)), silt_c = silt*(100/(sand+silt+clay)), clay_c = clay*(100/(sand+silt+clay))) %>% ungroup() 
+hwsd_ghana_data_dom.slab.lpksD <- hwsd_ghana_data_dom.slab.lpksD  %>%  dplyr::select(id, top, bottom, sand=sand_c, silt=silt_c, clay=clay_c, rfv)
+
+hwsd_ghana_data_dom.slab.lpksD <- hwsd_ghana_data_dom.slab.lpksD %>% dplyr::rowwise() %>% dplyr::mutate(txt=gettt_num(sand, silt, clay)) %>% ungroup()
+
+hwsd_ghana_data_dom <- hwsd_ghana_dom %>% dplyr::select(area,id=COMPID) %>% mutate(id = as.character(id)) %>% left_join(hwsd_ghana_data_dom.slab.lpksD, by=c('id'='id')) 
+hwsd_ghana_data_dom_txt <- hwsd_ghana_data_dom %>% st_drop_geometry() %>% dplyr::group_by(txt) %>% dplyr::summarize(txt_group_area = sum(area))
+hwsd_ghana_data_dom_top <- hwsd_ghana_data_dom %>% dplyr::filter(top==0)
+hwsd_ghana_data_dom_top$txt <-factor(hwsd_ghana_data_dom_top$txt, levels= c("1",  "6",  "7",  "9", "11", "12"))
+
+hwsd_ghana_data_dom_txt$prop <- hwsd_ghana_data_dom_txt$txt_group_area/sum(hwsd_ghana_data_dom_txt$txt_group_area)*100
+
+hwsd_txt_tot <- as.numeric(sum(hwsd_ghana_data_dom_txt$txt_group_area))-45672
+hwsd_ghana_data_dom_txt$prop <- hwsd_ghana_data_dom_txt$txt_group_area/hwsd_txt_tot*100
+
+#RFV
+hwsd_ghana_data_dom <- hwsd_ghana_data_dom %>% dplyr::mutate(rfv_class = if_else(rfv <=1, "0-1%", if_else(rfv >1 & rfv <=15, "1-15%", if_else(rfv >15 & rfv <=30, "15-30%", if_else(rfv >30 & rfv <=60, "30-60%", "60-100%")))))
+
+
+hwsd_ghana_dom_rfv <- hwsd_ghana_data_dom %>% dplyr::group_by(rfv_class) %>% dplyr::summarize(rfv_class_group_area = sum(area)) %>% st_set_geometry(NULL)
+
+hwsd_ghana_dom_rfv$prop <- hwsd_ghana_dom_rfv$rfv_class_group_area/sum(hwsd_ghana_dom_rfv$rfv_class_group_area)*100
+
+hwsd_rfv_class_tot <- as.numeric(sum(hwsd_ghana_dom_rfv$rfv_class_group_area))-45672
+hwsd_ghana_dom_rfv$prop <- hwsd_ghana_dom_rfv$rfv_class_group_area/hwsd_rfv_class_tot*100
+
+
+
+
+
+#hwsd col pal
+hwsd_col_pal <- c('#67001f', '#f7f7f7', '#d1e5f0', '#4393c3', '#2166ac', '#053061')
+pdf(here("analysis/figures/Ghana_HWSD_0_10_txt_class.pdf"), width = 4.5, height = 6)
+plot(hwsd_ghana_data_dom_top['txt'], pal=hwsd_col_pal)
+dev.off()
+
+
+```
+
+
+```{r}
+#WISE30sec
+wise_spatial <- read_sf("C:/LandPKS_API_SoilID-master/global/wise30sec_poly_simp_soil.shp")
+wise_spatial <- st_make_valid(wise_spatial)
+wise_ghana <- intersect(as_Spatial(wise_spatial), as_Spatial(ghana))
+wise_ghana <- st_as_sf(wise_ghana)
+wise_ghana$area <- st_area(wise_ghana)
+wise_ghana$area <- wise_ghana$area/1000000 
+wise_ghana <- wise_ghana %>% dplyr::group_by(area) %>% dplyr::mutate(poly_id = cur_group_id()) %>% ungroup()
+
+
+
+wise <- read.csv("C:/LandPKS_API_SoilID-master/global/wise_full_soil.csv")
+wise_gh_data <- wise %>% dplyr::filter(MU_GLOBAL %in% wise_ghana$MU_GLOBAL)
+wise_ghana_data <- wise_ghana %>% dplyr::left_join(wise_gh_data, by=c("MUGLB_NEW","MU_GLOBAL","NEWSUID"))
+wise_ghana_data <- wise_ghana_data %>% dplyr::filter(BotDep<61)
+wise_ghana_data_dom <- wise_ghana_data %>% dplyr::group_by(poly_id) %>% dplyr::filter(PROP==max(PROP)) %>% ungroup()
+
+
+
+wise_ghana_data_dom_sub <- wise_ghana_data_dom %>% dplyr::select(MUGLB_NEW, MU_GLOBAL, PROP,id=COMPID, top=TopDep, bottom=BotDep, sand=SDTO, silt=STPC, clay=CLPC, rfv=CFRAG, bedrock=REF_DEPTH) %>% st_drop_geometry()
+depths(wise_ghana_data_dom_sub) <- id ~ top + bottom
+wise_ghana_data_dom.slab.lpksD <- aqp::slab(wise_ghana_data_dom_sub, fm = id ~ sand + silt + clay + rfv, slab.structure=c(0,10,20,50), slab.fun=mean_na)
+wise_ghana_data_dom.slab.lpksD <- wise_ghana_data_dom.slab.lpksD %>% dplyr::select(-c(contributing_fraction)) %>% spread(variable, value)
+wise_ghana_data_dom.slab.lpksD[ is.na(wise_ghana_data_dom.slab.lpksD) ] <- NA
+
+# correct for particle size class predictions so that sand+silt+clay=100
+wise_ghana_data_dom.slab.lpksD <- wise_ghana_data_dom.slab.lpksD %>% rowwise() %>% dplyr::mutate(sand_c = sand*(100/(sand+silt+clay)), silt_c = silt*(100/(sand+silt+clay)), clay_c = clay*(100/(sand+silt+clay))) %>% ungroup() 
+wise_ghana_data_dom.slab.lpksD <- wise_ghana_data_dom.slab.lpksD  %>%  dplyr::select(id, top, bottom, sand=sand_c, silt=silt_c, clay=clay_c, rfv)
+
+wise_ghana_data_dom.slab.lpksD <- wise_ghana_data_dom.slab.lpksD %>% dplyr::rowwise() %>% dplyr::mutate(txt=gettt_num(sand, silt, clay)) %>% ungroup()
+
+wise_ghana_data_dom <- wise_ghana_data_dom %>% dplyr::select(area,id=COMPID) %>% mutate(id = as.character(id)) %>% left_join(wise_ghana_data_dom.slab.lpksD, by=c('id'='id')) 
+wise_ghana_data_dom_txt <- wise_ghana_data_dom %>% st_drop_geometry() %>% dplyr::group_by(txt) %>% dplyr::summarize(txt_group_area = sum(area))
+wise_ghana_data_dom_top <- wise_ghana_data_dom %>% dplyr::filter(top==0)
+wise_ghana_data_dom_top$txt <-factor(wise_ghana_data_dom_top$txt, levels= c("1", "3", "4",  "6",  "7",  "9", "11"))
+
+wise_ghana_data_dom_txt$prop <- wise_ghana_data_dom_txt$txt_group_area/sum(wise_ghana_data_dom_txt$txt_group_area)*100
+
+
+#RFV
+wise_ghana_data_dom <- wise_ghana_data_dom %>% dplyr::mutate(rfv_class = if_else(rfv <=1, "0-1%", if_else(rfv >1 & rfv <=15, "1-15%", if_else(rfv >15 & rfv <=30, "15-30%", if_else(rfv >30 & rfv <=60, "30-60%", "60-100%")))))
+
+wise_ghana_data_dom_rfv <- wise_ghana_data_dom %>% st_drop_geometry() %>% dplyr::group_by(rfv_class) %>% dplyr::summarize(rfv_class_group_area = sum(area))  %>% purrr::set_names('class', 'area')
+
+
+wise_rfv_class_sum <- wise_ghana_data_dom_rfv %>% dplyr::group_by(class) %>% dplyr::summarise(class_sum = sum(area, na.rm = T))
+wise_rfv_tot <- sum(wise_rfv_class_sum$class_sum)%>%as.numeric()
+wise_rfv_class_sum$prop <- wise_rfv_class_sum$class_sum/wise_rfv_tot*100
+
+
+#wise col pal
+wise_col_pal <- c('#67001f', '#d6604d', '#f4a582', '#f7f7f7', '#d1e5f0', '#4393c3', '#2166ac')
+pdf(here("analysis/figures/Ghana_WISE_0_10_txt_class.pdf"), width = 4.5, height = 6)
+plot(wise_ghana_data_dom_top['txt'], pal=wise_col_pal)
+dev.off()
+```
+
+
+# Calculate HWSD/WISE map unit polygon size
+```{r}
+
+int <-  st_intersects(hwsd_ghana, LPKS_soil_pts.sf, sparse = FALSE)
+
+hwsd_ghana.int <- hwsd_ghana[which(apply(int, 1, any)==TRUE),]
+
+View(hwsd_ghana.int %>% dplyr::select(area, poly_id) %>% dplyr::mutate(area=area %>% round(3)))
+``` 
+
+# study site plotting
+```{r}
+maize <- terra::rast(here('data/Harvest_Choice/Crops_Production/cell5m_Agriculture_Crops_production_MAIZ_R_P.tif'))
+
+
+maize_c <- crop(maize, extent(ghana))
+maize_m <- mask(maize_c, terra::vect(as_Spatial(ghana)))
+gh_proj <- crs("+init=EPSG:2136")
+maize_proj <-projectRaster(raster(maize_m), crs=gh_proj)
+
+revMagma <- rasterTheme(region = rev(magma(10)))
+
+pdf(here("results/figures/Ghana_maize.pdf"), width = 4.5, height = 6)
+rasterVis::levelplot(raster(maize_m), par.settings = revMagma) #+ layer(sp.polygons(as_Spatial(ghana[1,3]), lwd=0.8, col='black'))
+dev.off()
+
+library(ggspatial)
+
+ghana_aez <- read_sf(here('data/AEZ/Ghana/Ghana_AEZs.shp'))
+ghana_aez <- ghana_aez %>% dplyr::select(AEZ)
+ghana_aez.proj <- st_transform(ghana_aez, "+init=epsg:2136")
+
+LPKS_Ghana_Soil <- readRDS(here('data/LPKS/LPKS_Ghana_Soil.rds'))
+
+# create spatial point file for 6K+ LPKS Ghana sites
+LPKS_Ghana_Soil.sf <- st_as_sf(x=LPKS_Ghana_Soil %>% dplyr::select(id, latitude, longitude) %>% distinct(), coords = c("longitude", "latitude"), crs = "+proj=longlat +datum=WGS84")
+LPKS_Ghana_Soil.sf.proj <- st_transform(LPKS_Ghana_Soil.sf, "+init=epsg:2136")
+pdf(here("results/figures/Ghana_aez_lpks_pts.pdf"))
+ggplot() +
+    geom_sf(data = ghana_aez, aes(fill = AEZ))  +
+    scale_color_viridis(discrete=TRUE) +
+    geom_sf(data = LPKS_Ghana_Soil.sf, size = .5, 
+        shape = 19, fill = "darkred") +
+   # spatial-aware automagic scale bar
+    annotation_scale(location = "tl") +
+  
+    # spatial-aware automagic north arrow
+    annotation_north_arrow(location = "br", which_north = "true") #+
+   #coord_sf(datum=st_crs(2136))
+dev.off()
+
+```
+
+
+# Combine soil map frequency plots
+```{r}
+#texture
+sg2_ghaha_txt <- sg2_txt_freq_sum  %>% dplyr::select(txt=value, prop) %>% mutate(var="SG2") %>% mutate(txt=as.factor(txt), prop=as.numeric(prop))
+isda_ghana_txt <- isda_txt_freq_sum  %>% dplyr::select(txt=value, prop) %>% mutate(var="ISDA") %>% mutate(txt=as.factor(txt), prop=as.numeric(prop))
+hwsd_ghana_txt <-  hwsd_ghana_dom_txt %>% dplyr::select(txt=txt_top, prop) %>% mutate(var="HWSD") %>% mutate(txt=as.factor(txt), prop=as.numeric(prop))
+wise_ghana_txt <- wise_ghana_data_dom_txt %>% dplyr::select(txt, prop) %>% mutate(var="WISE") %>% mutate(txt=as.factor(txt), prop=as.numeric(prop))
+
+soil_map_txt <- hwsd_ghana_txt %>% full_join(wise_ghana_txt, by=c("txt", "prop", "var"))
+soil_map_txt <- soil_map_txt %>% full_join(sg2_ghaha_txt, by=c("txt", "prop", "var"))
+soil_map_txt <- soil_map_txt %>% full_join(isda_ghana_txt, by=c("txt", "prop", "var"))
+soil_map_txt <- soil_map_txt %>% dplyr::filter(!is.na(txt))
+soil_map_txt <- soil_map_txt %>% mutate(prop = round(prop/100,3))
+soil_map_txt <- soil_map_txt %>% left_join(isda_txt %>% dplyr::select(txt=txt_code, txt_name) %>% mutate(txt=as.factor(txt)), by="txt")
+soil_map_txt$txt_name <- factor(soil_map_txt$txt_name, levels=c("bedrock", "Clay", "Silty clay", "Sandy clay", "Silty clay loam", "Clay loam", "Sandy clay loam", "Silt loam", "Loam", "Sandy loam", "Loamy sand", "Sand"))
+
+p <- qplot(x = txt_name, y = prop, fill = txt_name, data = soil_map_txt, ylim=c(0,0.65), geom = "col") + scale_x_discrete(drop=FALSE)
+
+pdf(here("analysis/figures/Ghana_soil_map_texture_freq_map_ghana_lpks_depths.pdf"), width = 10, height = 7)
+p + facet_wrap(~var) + scale_fill_manual(values=c('black','#67001f','#b2182b','#d6604d','#f4a582','#fddbc7','#f7f7f7','#d1e5f0','#92c5de','#4393c3','#2166ac','#053061'),drop=FALSE) + geom_col(color = "black", size = .5)
+dev.off()
+
+
+#RFV
+hwsd_class_sum
+wise_rfv_class_sum
+class_sum
+isda_class_sum
+
+
+sg2_ghaha_rfv <- class_sum  %>% dplyr::select(rfv=rfv_class, prop) %>% mutate(var="SG2") %>% mutate(rfv=as.factor(rfv), prop=as.numeric(prop))
+isda_ghana_rfv <- isda_class_sum  %>% dplyr::select(rfv=rfv_class, prop) %>% mutate(var="ISDA") %>% mutate(rfv=as.factor(rfv), prop=as.numeric(prop))
+hwsd_ghana_rfv <-  hwsd_class_sum %>% dplyr::select(rfv=class, prop) %>% mutate(var="HWSD") %>% mutate(rfv=as.factor(rfv), prop=as.numeric(prop))
+wise_ghana_rfv <- wise_rfv_class_sum %>% dplyr::select(rfv=class, prop) %>% mutate(var="WISE") %>% mutate(rfv=as.factor(rfv), prop=as.numeric(prop))
+
+soil_map_rfv <- hwsd_ghana_rfv %>% full_join(wise_ghana_rfv, by=c("rfv", "prop", "var"))
+soil_map_rfv <- soil_map_rfv %>% full_join(sg2_ghaha_rfv, by=c("rfv", "prop", "var"))
+soil_map_rfv <- soil_map_rfv %>% full_join(isda_ghana_rfv, by=c("rfv", "prop", "var"))
+soil_map_rfv <- soil_map_rfv %>% dplyr::filter(!is.na(rfv))
+soil_map_rfv <- soil_map_rfv %>% mutate(prop = round(prop))
+soil_map_rfv$rfv <- factor(soil_map_rfv$rfv, levels=c("0-1%", "1-15%", "15-30%", "30-60%", "60-100%", "bedrock"))
+p <- qplot(x = rfv, y = prop, fill = rfv, data = soil_map_rfv, ylim=c(0,100), geom = "col") + scale_x_discrete(drop=FALSE)
+
+pdf(here("analysis/figures/Ghana_soil_map_rfv_freq_map_ghana_lpks_depths.pdf"), width = 7.3, height = 7)
+p + facet_wrap(~var) + scale_fill_manual(values=rev(c('black', '#67001f','#b2182b','#d6604d','#f4a582','#fddbc7')),drop=FALSE) + geom_col(color = "black", size = .5)
+dev.off()
+
+
+```
+
+
+
+```{r}
+#save.image(here('data/derived_data/LandPKS_Ghana_Map_Compare.RData'))
+load(here('data/derived_data/LandPKS_Ghana_Map_Compare.RData'))
+```
